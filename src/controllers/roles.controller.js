@@ -1,25 +1,62 @@
 /**
  * roles.controller.js
- * Controlador del módulo de Roles (adm_roles) y asignaciones (adm_usuario_rol) - uso futuro.
- *
- * Endpoints planeados:
- *   GET   /api/roles            POST /api/roles            PUT /api/roles/:id    PATCH /api/roles/:id/estado
- *   GET   /api/usuario-rol      POST /api/usuario-rol      PUT /api/usuario-rol/:id   PATCH /api/usuario-rol/:id/estado
+ * CRUD de Roles (adm_roles) y asignaciones Usuario-Rol (adm_usuario_rol).
+ * Para usuario-rol, la lista incluye el nombre de usuario y el tipo de rol (JOIN).
  */
-const { error } = require('../utils/response');
+const { byFixed } = require('./crud.factory');
+const crud = require('../services/crud.service');
+const { getResource } = require('../config/resources');
+const { query } = require('../database/db');
+const { success, error } = require('../utils/response');
 
-const noImpl = (name) => (req, res) =>
-  error(res, `Endpoint roles.${name} no implementado en esta fase.`, 501);
+const rolesHandlers = byFixed('roles');
+const userOf = (req) => (req.user && req.user.usuario) || 'sistema';
 
 module.exports = {
-  list: noImpl('list'),
-  getById: noImpl('getById'),
-  create: noImpl('create'),
-  update: noImpl('update'),
-  changeEstado: noImpl('changeEstado'),
-  // Asignaciones usuario-rol
-  listUsuarioRol: noImpl('listUsuarioRol'),
-  createUsuarioRol: noImpl('createUsuarioRol'),
-  updateUsuarioRol: noImpl('updateUsuarioRol'),
-  changeEstadoUsuarioRol: noImpl('changeEstadoUsuarioRol'),
+  // ---- Roles ----
+  list: rolesHandlers.list,
+  getById: rolesHandlers.getById,
+  create: rolesHandlers.create,
+  update: rolesHandlers.update,
+  changeEstado: rolesHandlers.changeEstado,
+
+  // ---- Usuario-Rol ----
+  async listUsuarioRol(req, res, next) {
+    try {
+      const rows = await query(
+        `SELECT ur.codigo, ur.id_usuario, ur.id_rol, ur.estado,
+                u.usuario, u.nombre AS nombre_usuario,
+                r.tipo_rol AS rol
+           FROM adm_usuario_rol ur
+           JOIN adm_usuarios u ON u.codigo = ur.id_usuario
+           JOIN adm_roles r ON r.codigo = ur.id_rol
+          ORDER BY ur.codigo DESC`
+      );
+      success(res, rows);
+    } catch (e) { next(e); }
+  },
+
+  async createUsuarioRol(req, res, next) {
+    try {
+      const def = getResource('usuario-rol');
+      const row = await crud.create(def, req.body, userOf(req));
+      success(res, row, 'Asignación creada correctamente', 201);
+    } catch (e) { next(e); }
+  },
+
+  async updateUsuarioRol(req, res, next) {
+    try {
+      const def = getResource('usuario-rol');
+      const row = await crud.update(def, req.params.id, req.body, userOf(req));
+      success(res, row, 'Asignación actualizada correctamente');
+    } catch (e) { next(e); }
+  },
+
+  async changeEstadoUsuarioRol(req, res, next) {
+    try {
+      const def = getResource('usuario-rol');
+      const row = await crud.patchEstado(def, req.params.id, req.body.estado, userOf(req));
+      success(res, row, 'Estado actualizado correctamente');
+    } catch (e) { next(e); }
+  },
 };

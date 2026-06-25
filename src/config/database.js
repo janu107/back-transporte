@@ -1,11 +1,6 @@
 /**
  * database.js
- * Configuración de la conexión a MySQL (uso futuro - Fase backend).
- *
- * En esta fase NO se conecta realmente a la base de datos. El pool se crea
- * de forma perezosa (lazy) en ./src/database/pool.js. Aquí se exponen los
- * datos de configuración y una utilidad para probar la conexión cuando
- * se decida activar la persistencia real.
+ * Configuración de la conexión a MySQL y prueba de conexión.
  */
 const env = require('./env');
 
@@ -19,21 +14,22 @@ const dbConfig = {
   connectionLimit: 10,
   queueLimit: 0,
   charset: 'utf8mb4',
+  dateStrings: true, // devuelve fechas como string (evita desfases de zona horaria)
 };
 
 /**
  * testConnection
- * Prueba la conexión a MySQL. Pensado para invocarse desde server.js
- * cuando se active la base de datos real.
+ * Verifica que el pool puede conectarse a MySQL. Devuelve true o lanza error.
  */
 async function testConnection() {
-  // const { getPool } = require('../database/pool');
-  // const pool = getPool();
-  // const conn = await pool.getConnection();
-  // await conn.ping();
-  // conn.release();
-  // return true;
-  throw new Error('Conexión a base de datos no habilitada en esta fase.');
+  const { getPool } = require('../database/pool');
+  const conn = await getPool().getConnection();
+  try {
+    await conn.ping();
+    return true;
+  } finally {
+    conn.release();
+  }
 }
 
 module.exports = { dbConfig, testConnection };
