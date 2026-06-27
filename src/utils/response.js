@@ -22,7 +22,17 @@ function success(res, data = null, message = 'OK', status = 200) {
  * @param {*} details Detalle opcional del error
  */
 function error(res, message = 'Error interno', status = 500, details = null) {
-  return res.status(status).json({ ok: false, message, details });
+  const logger = require('./logger');
+  const requestId = res.req?.requestId;
+  const meta = {
+    requestId,
+    method: res.req?.method,
+    path: res.req?.originalUrl,
+    status,
+  };
+  if (status >= 500) logger.error(message, meta);
+  else logger.warn(message, meta);
+  return res.status(status).json({ ok: false, message, details, requestId });
 }
 
 module.exports = { success, error };

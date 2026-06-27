@@ -821,3 +821,8 @@ INSERT INTO `con_parametros` (`codigo`,`nombre_empresa`,`nit`,`telefono`,`correo
 VALUES (1,'SETRASA','1234567-8','2222-3333','admin@setrasa.com',12.00,5.00,5.00,'Administrador','sistema');
 
 -- El usuario administrador se crea con: npm run init:admin  (contraseña hasheada con bcrypt)
+--
+-- Módulo CONTROL DEL API (Confirmación de Vales): después de este script, ejecutar
+--   mysql app_transporte < sql/control_captura_api.sql
+-- para crear la tabla control_captura_api, su bitácora, triggers y el
+-- procedimiento sp_confirmar_despacho_api (botón CONFIRMAR).

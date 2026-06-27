@@ -8,6 +8,7 @@
  */
 const mysql = require('mysql2/promise');
 const { dbConfig } = require('../config/database');
+const logger = require('../utils/logger');
 
 let pool = null;
 
@@ -18,6 +19,13 @@ let pool = null;
  */
 function getPool() {
   if (!pool) {
+    logger.info('Creando pool de conexiones MySQL', {
+      host: dbConfig.host,
+      port: dbConfig.port,
+      database: dbConfig.database,
+      user: dbConfig.user,
+      connectionLimit: dbConfig.connectionLimit,
+    });
     pool = mysql.createPool(dbConfig);
   }
   return pool;

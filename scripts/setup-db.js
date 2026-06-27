@@ -1,10 +1,12 @@
 /**
  * setup-db.js
- * Ejecuta sql/app_transporte.sql contra MySQL de forma robusta, sin depender de
+ * Ejecuta un archivo de sql/ contra MySQL de forma robusta, sin depender de
  * phpMyAdmin. Parte el script en sentencias respetando las directivas DELIMITER
  * (necesarias por los triggers) y ejecuta cada una por separado.
  *
- * Uso:  npm run setup:db
+ * Uso:
+ *   npm run setup:db
+ *   node scripts/setup-db.js control_captura_api.sql
  * Conexión: usa las variables de entorno (.env). NO requiere base preexistente.
  */
 require('dotenv').config();
@@ -47,10 +49,19 @@ function splitStatements(sql) {
 }
 
 async function main() {
-  const file = path.join(__dirname, '..', 'sql', 'app_transporte.sql');
+  const requestedFile = process.argv[2] || 'app_transporte.sql';
+  if (path.basename(requestedFile) !== requestedFile || !requestedFile.toLowerCase().endsWith('.sql')) {
+    throw new Error(`Nombre de archivo SQL no válido: ${requestedFile}`);
+  }
+
+  const file = path.join(__dirname, '..', 'sql', requestedFile);
+  if (!fs.existsSync(file)) {
+    throw new Error(`No existe el archivo SQL: ${file}`);
+  }
+
   const sql = fs.readFileSync(file, 'utf8');
   const statements = splitStatements(sql);
-  logger.info(`Sentencias a ejecutar: ${statements.length}`);
+  logger.info('Instalación SQL iniciada', { file: requestedFile, statements: statements.length });
 
   // Conexión sin base seleccionada (el script crea/usa la base).
   const conn = await mysql.createConnection({
@@ -71,14 +82,16 @@ async function main() {
         throw e;
       }
     }
-    logger.info(`Esquema creado correctamente (${n} sentencias ejecutadas).`);
-    logger.info('Ahora ejecuta:  npm run init:admin');
+    logger.info('Instalación SQL completada', { file: requestedFile, executedStatements: n });
+    if (requestedFile === 'app_transporte.sql') {
+      logger.info('Ahora ejecuta: npm run init:admin');
+    }
   } finally {
     await conn.end();
   }
 }
 
 main().catch((err) => {
-  logger.error('setup-db falló:', err.message);
+  logger.error('Instalación SQL falló', { error: err });
   process.exit(1);
 });

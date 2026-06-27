@@ -4,23 +4,23 @@
  */
 const express = require('express');
 const helmet = require('helmet');
-const morgan = require('morgan');
 const cors = require('cors');
 
 const corsOptions = require('./config/cors');
 const routes = require('./routes/index.routes');
+const requestLogger = require('./middlewares/request-logger.middleware');
 const { notFoundHandler, errorHandler } = require('./middlewares/error.middleware');
 
 const app = express();
+
+// ID y trazas de cada petición, incluso cuando otro middleware la rechaza.
+app.use(requestLogger);
 
 // Seguridad de cabeceras HTTP
 app.use(helmet());
 
 // CORS
 app.use(cors(corsOptions));
-
-// Logger de peticiones
-app.use(morgan('dev'));
 
 // Parseo de body
 app.use(express.json());

@@ -6,7 +6,7 @@ require('dotenv').config();
 
 const env = {
   NODE_ENV: process.env.NODE_ENV || 'development',
-  PORT: parseInt(process.env.PORT, 10) || 3000,
+  PORT: parseInt(process.env.PORT, 10) || 3002,
 
   // Configuración de base de datos (uso futuro - Fase backend)
   DB_HOST: process.env.DB_HOST || 'localhost',

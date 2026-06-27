@@ -23,12 +23,12 @@ npm run dev            # nodemon
 npm start              # node
 ```
 
-Servidor por defecto: `http://localhost:3000`
+Servidor por defecto: `http://localhost:3002`
 
 ### Verificación
 
 ```
-GET http://localhost:3000/api/health
+GET http://localhost:3002/api/health
 => { "ok": true, "message": "API app_transporte funcionando" }
 ```
 
@@ -60,7 +60,7 @@ back-transporte/
 
 | Variable        | Descripción                         | Default                  |
 |-----------------|-------------------------------------|--------------------------|
-| `PORT`          | Puerto del servidor                 | `3000`                   |
+| `PORT`          | Puerto del servidor                 | `3002`                   |
 | `DB_HOST`       | Host MySQL (futuro)                 | `localhost`              |
 | `DB_USER`       | Usuario MySQL (futuro)              | `root`                   |
 | `DB_PASSWORD`   | Contraseña MySQL (futuro)           | _(vacío)_                |
