@@ -9,7 +9,7 @@
  * El SP usa parámetros OUT; se invoca sobre una conexión dedicada del pool
  * (CALL ... @vars; SELECT @vars) porque el pool no tiene multipleStatements.
  */
-const { query } = require('../database/db');
+const { query, execute } = require('../database/db');
 const { getPool } = require('../database/pool');
 
 /**
@@ -19,13 +19,57 @@ const { getPool } = require('../database/pool');
  */
 async function listarPendientes() {
   return query(
-    `SELECT api_id, api_numero, api_num_vale, api_fecha, api_cant_galones,
-            api_id_piloto, api_licencia, api_nombre_piloto, api_id_vehiculo,
-            api_placa, api_descripcion, api_manguera, api_surtidor, api_estado
-       FROM control_captura_api
-      WHERE api_estado = 'P'
-      ORDER BY api_fecha DESC, api_id DESC`
+    `SELECT c.api_id, c.api_numero, c.api_num_vale, c.api_fecha, c.api_cant_galones,
+            c.api_id_piloto, c.api_licencia, c.api_nombre_piloto, c.api_id_vehiculo,
+            c.api_placa, c.api_descripcion, c.api_manguera, c.api_surtidor, c.api_estado,
+            c.api_id_ubicacion, u.descripcion AS api_ubicacion_nombre
+       FROM control_captura_api c
+       LEFT JOIN cat_ubicacion_bomba u ON u.codigo = c.api_id_ubicacion
+      WHERE c.api_estado = 'P'
+      ORDER BY c.api_fecha DESC, c.api_id DESC`
   );
+}
+
+/**
+ * asignarUbicacion
+ * Asigna (o limpia) el predio/ubicación de un vale del API.
+ * @param {number} apiId        control_captura_api.api_id
+ * @param {number|null} idUbic  cat_ubicacion_bomba.codigo (null para limpiar)
+ * @returns {Promise<{api_id:number, api_id_ubicacion:number|null, api_ubicacion_nombre:string|null}>}
+ */
+async function asignarUbicacion(apiId, idUbic) {
+  const id = requerirNumero(apiId, 'api_id');
+
+  // idUbic puede ser null (limpiar) o un entero positivo válido.
+  let idUbicacion = null;
+  if (idUbic !== undefined && idUbic !== null && idUbic !== '') {
+    idUbicacion = requerirNumero(idUbic, 'id_ubicacion');
+    const existe = await query('SELECT codigo FROM cat_ubicacion_bomba WHERE codigo = ?', [idUbicacion]);
+    if (!existe.length) {
+      const e = new Error('El predio (ubicación) seleccionado no existe.');
+      e.status = 400;
+      throw e;
+    }
+  }
+
+  const result = await execute(
+    'UPDATE control_captura_api SET api_id_ubicacion = ? WHERE api_id = ? AND api_estado = ?',
+    [idUbicacion, id, 'P']
+  );
+  if (!result.affectedRows) {
+    const e = new Error('Vale no encontrado o ya no está pendiente.');
+    e.status = 404;
+    throw e;
+  }
+
+  const [row] = await query(
+    `SELECT c.api_id, c.api_id_ubicacion, u.descripcion AS api_ubicacion_nombre
+       FROM control_captura_api c
+       LEFT JOIN cat_ubicacion_bomba u ON u.codigo = c.api_id_ubicacion
+      WHERE c.api_id = ?`,
+    [id]
+  );
+  return row;
 }
 
 /** Valida que un valor sea un entero/numero positivo; lanza Error 400 si no. */
@@ -85,4 +129,4 @@ async function confirmar(data, usuario) {
   }
 }
 
-module.exports = { listarPendientes, confirmar };
+module.exports = { listarPendientes, asignarUbicacion, confirmar };

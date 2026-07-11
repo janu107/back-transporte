@@ -11,6 +11,7 @@ const authMiddleware = require('../middlewares/auth.middleware');
 const router = Router();
 
 router.get('/pendientes', authMiddleware, ctrl.pendientes);
+router.patch('/pendientes/:id/ubicacion', authMiddleware, ctrl.asignarUbicacion);
 router.post('/confirmar', authMiddleware, ctrl.confirmar);
 
 module.exports = router;

@@ -54,7 +54,7 @@ const RESOURCES = {
   // ---- Procesos (URL: /procesos/:recurso) ----
   'poliza-detalle': {
     table: 'pro_poliza_detalle', pk: 'correlativo',
-    columns: ['num_envio', 'id_poliza', 'id_transportista', 'id_camion', 'id_piloto', 'id_tarifa_embarque',
+    columns: ['num_envio', 'id_poliza', 'id_transportista', 'id_camion', 'id_piloto', 'num_tc', 'id_tarifa_embarque',
       'fecha', 'tipo', 'cantidad_bultos_piezas', 'peso', 'valor', 'estado', 'observaciones'],
     hasEstado: true,
   },

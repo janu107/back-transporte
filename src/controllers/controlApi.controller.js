@@ -17,6 +17,16 @@ module.exports = {
     }
   },
 
+  /** PATCH /control-api/pendientes/:id/ubicacion — asigna el predio del vale. */
+  async asignarUbicacion(req, res, next) {
+    try {
+      const row = await service.asignarUbicacion(req.params.id, req.body.id_ubicacion);
+      success(res, row, 'Predio asignado correctamente');
+    } catch (e) {
+      next(e);
+    }
+  },
+
   /** POST /control-api/confirmar — ejecuta sp_confirmar_despacho_api. */
   async confirmar(req, res, next) {
     try {
