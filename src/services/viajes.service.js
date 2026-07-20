@@ -12,12 +12,18 @@
  * Agregados que consume la pantalla:
  *   - saldo_piezas y viajes_realizados por póliza.
  */
-const { query, queryOne, execute } = require('../database/db');
+const { query, queryOne, execute, withTransaction } = require('../database/db');
+const { siguienteCorrelativo } = require('../utils/correlativo');
 
-// Coeficiente de la fórmula del valor del viaje (VALOR = PESO_kg × COEF).
-const COEFICIENTE_VALOR = 0.0043;
+// Factor kg->lb de la fórmula del valor: VALOR = ROUND(peso_kg × 0.022046 × tarifa, 2).
+const FACTOR_KG_LB = 0.022046;
 
 const ESTADO_ANULADA = 'ANULADA';
+
+/** Calcula el valor del viaje: peso(kg) × 0.022046 × valor_tarifa, redondeado a 2. */
+function calcularValor(pesoKg, valorTarifa) {
+  return Number((Number(pesoKg || 0) * FACTOR_KG_LB * Number(valorTarifa || 0)).toFixed(2));
+}
 
 /** Normaliza '' | undefined -> null. */
 const nz = (v) => (v === '' || v === undefined ? null : v);
@@ -146,10 +152,21 @@ async function validarYNormalizar(data, excluirCorrelativo = null) {
     throw errorNegocio(`Las piezas del viaje (${piezas}) exceden el saldo disponible de la póliza (${saldo}).`);
   }
 
-  // 5) Valor = peso × coeficiente (recalculado en servidor).
+  // 5) Valor = peso(kg) × 0.022046 × valor_tarifa (recalculado en servidor).
   const peso = Number(data.peso || 0);
   if (peso < 0) throw errorNegocio('El peso no puede ser negativo.', 400);
-  const valor = Number((peso * COEFICIENTE_VALOR).toFixed(2));
+  const idTarifa = nz(data.id_tarifa_embarque);
+  let valorTarifa = 0;
+  if (idTarifa != null) {
+    const tarifa = await queryOne(
+      'SELECT valor, estado FROM cat_tarifa_embarque WHERE codigo = ?', [idTarifa]
+    );
+    if (!tarifa || String(tarifa.estado).toUpperCase() !== 'ACTIVO') {
+      throw errorNegocio('Tarifa de embarque no encontrada o inactiva.', 400);
+    }
+    valorTarifa = Number(tarifa.valor || 0);
+  }
+  const valor = calcularValor(peso, valorTarifa);
 
   return {
     num_envio: nz(data.num_envio),
@@ -175,20 +192,70 @@ const COLUMNAS_INSERT = [
   'estado', 'observaciones',
 ];
 
-/** Crea un viaje validando las reglas de negocio. */
+/** Crea un viaje validando las reglas de negocio. Genera el correlativo del envío. */
 async function crear(data, usuario) {
   const row = await validarYNormalizar(data, null);
+  const anio = new Date().getFullYear();
 
-  const cols = [...COLUMNAS_INSERT, 'usuario_graba'];
-  const vals = [...COLUMNAS_INSERT.map((c) => row[c]), usuario || 'sistema'];
-  const placeholders = cols.map(() => '?').join(', ');
-  const colList = cols.map((c) => `\`${c}\``).join(', ');
+  return withTransaction(async (conn) => {
+    // [M5.3] Correlativo AÑO+00000 generado en servidor (ignora lo que envíe el cliente).
+    row.num_envio = await siguienteCorrelativo(conn, 'pro_poliza_detalle', 'num_envio', anio);
 
-  const result = await execute(
-    `INSERT INTO \`pro_poliza_detalle\` (${colList}) VALUES (${placeholders})`,
-    vals
+    const cols = [...COLUMNAS_INSERT, 'usuario_graba'];
+    const vals = [...COLUMNAS_INSERT.map((c) => row[c]), usuario || 'sistema'];
+    const placeholders = cols.map(() => '?').join(', ');
+    const colList = cols.map((c) => `\`${c}\``).join(', ');
+
+    const [result] = await conn.query(
+      `INSERT INTO \`pro_poliza_detalle\` (${colList}) VALUES (${placeholders})`,
+      vals
+    );
+    const [rows] = await conn.query(
+      'SELECT * FROM `pro_poliza_detalle` WHERE `correlativo` = ?', [result.insertId]
+    );
+    return rows[0];
+  });
+}
+
+/**
+ * validarCalcular (M2 · sp_validar_calcular_envio en JS)
+ * Valida piezas contra el saldo de la póliza y calcula el valor del envío.
+ * @param {object} data { id_poliza, id_tarifa_embarque, cantidad_piezas, peso_kg }
+ * @returns {Promise<{saldo_piezas:number, valor:number, mensaje:string}>}
+ */
+async function validarCalcular(data) {
+  const idPoliza = requerirNumero(data.id_poliza, 'id_poliza');
+  const idTarifa = requerirNumero(data.id_tarifa_embarque, 'id_tarifa_embarque');
+  const piezas = Number(data.cantidad_piezas || 0);
+  const peso = Number(data.peso_kg || 0);
+
+  const poliza = await queryOne('SELECT cantidad_piezas FROM man_poliza WHERE codigo = ?', [idPoliza]);
+  if (!poliza) throw errorNegocio('Poliza no encontrada', 404);
+  const total = Number(poliza.cantidad_piezas || 0);
+  if (piezas > total) {
+    throw errorNegocio(`No puede poner mayor a las piezas de la poliza. Total poliza: ${total} piezas.`);
+  }
+
+  const agg = await queryOne(
+    `SELECT COALESCE(SUM(cantidad_bultos_piezas), 0) AS usadas
+       FROM pro_poliza_detalle WHERE id_poliza = ? AND estado <> ?`,
+    [idPoliza, ESTADO_ANULADA]
   );
-  return queryOne('SELECT * FROM `pro_poliza_detalle` WHERE `correlativo` = ?', [result.insertId]);
+  const saldo = total - Number(agg.usadas || 0);
+  if (piezas > saldo) {
+    throw errorNegocio(`Se paso del saldo restante del envio. Saldo disponible: ${saldo} piezas.`);
+  }
+
+  const tarifa = await queryOne('SELECT valor, estado FROM cat_tarifa_embarque WHERE codigo = ?', [idTarifa]);
+  if (!tarifa || String(tarifa.estado).toUpperCase() !== 'ACTIVO') {
+    throw errorNegocio('Tarifa de embarque no encontrada o inactiva');
+  }
+  const valor = calcularValor(peso, tarifa.valor);
+  return {
+    saldo_piezas: saldo,
+    valor,
+    mensaje: `OK. Valor calculado: Q${valor.toFixed(2)}. Saldo piezas restante: ${saldo}`,
+  };
 }
 
 /** Actualiza un viaje (re-valida saldo excluyendo el propio registro). */
@@ -221,9 +288,10 @@ async function cambiarEstado(id, estado, usuario) {
 }
 
 module.exports = {
-  COEFICIENTE_VALOR,
+  FACTOR_KG_LB,
   listar,
   resumenPoliza,
+  validarCalcular,
   crear,
   actualizar,
   cambiarEstado,

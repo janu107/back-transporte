@@ -22,6 +22,13 @@ module.exports = {
     } catch (e) { next(e); }
   },
 
+  /** POST /viajes/validar — valida piezas vs saldo y calcula el valor (M2). */
+  async validar(req, res, next) {
+    try {
+      success(res, await service.validarCalcular(req.body));
+    } catch (e) { next(e); }
+  },
+
   /** POST /viajes — crea un viaje (valida saldo, póliza abierta, piloto/transportista). */
   async create(req, res, next) {
     try {

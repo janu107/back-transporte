@@ -3,14 +3,17 @@
  * Lógica del módulo CONTROL DEL API (Confirmación de Vales - Enlace MATO).
  *
  * - listarPendientes(): vales capturados desde el API en estado 'P' (Pendiente).
- * - confirmar(): ejecuta el procedimiento sp_confirmar_despacho_api (botón CONFIRMAR),
- *   que genera el/los registro(s) en pro_detalle_facturas y marca el vale como 'C'.
- *
- * El SP usa parámetros OUT; se invoca sobre una conexión dedicada del pool
- * (CALL ... @vars; SELECT @vars) porque el pool no tiene multipleStatements.
+ * - confirmar(): [M1] DELEGA la confirmación al servicio externo
+ *   (CONFIRM_EXTERNAL_URL, por defecto http://localhost:3001/api/confirmar-despacho).
+ *   Ese servicio ejecuta sp_confirmar_despacho_api, actualiza saldo, marca el vale
+ *   como 'C', genera el PDF y envía el correo (Brevo). Nuestro backend YA NO ejecuta
+ *   el SP directamente para evitar doble confirmación.
  */
+const axios = require('axios');
 const { query, execute } = require('../database/db');
-const { getPool } = require('../database/pool');
+
+// URL del servicio externo de confirmación + correo (configurable por entorno).
+const CONFIRM_EXTERNAL_URL = process.env.CONFIRM_EXTERNAL_URL || 'http://localhost:3001/api/confirmar-despacho';
 
 /**
  * listarPendientes
@@ -91,41 +94,39 @@ function requerirNumero(valor, campo) {
  *    p_id_bomba, p_id_poliza, p_usuario, OUT det1, det2, hubo_cruce, mensaje)
  * @param {object} data { api_id, id_piloto, id_camion, id_transportista, id_producto, id_bomba, id_poliza }
  * @param {string} usuario  usuario en sesión
- * @returns {Promise<{det1:number|null, det2:number|null, hubo_cruce:number, mensaje:string}>}
+ * @returns {Promise<object>} respuesta del servicio externo (ok, mensaje, correo_enviado, ...)
  */
 async function confirmar(data, usuario) {
-  const apiId = requerirNumero(data.api_id, 'api_id');
-  const idPiloto = requerirNumero(data.id_piloto, 'id_piloto');
-  const idCamion = requerirNumero(data.id_camion, 'id_camion');
-  const idTransportista = requerirNumero(data.id_transportista, 'id_transportista');
-  const idProducto = requerirNumero(data.id_producto, 'id_producto');
-  const idBomba = requerirNumero(data.id_bomba, 'id_bomba');
-  const idPoliza = requerirNumero(data.id_poliza, 'id_poliza');
+  // Presencia mínima de parámetros antes de delegar.
+  const payload = {
+    api_id: requerirNumero(data.api_id, 'api_id'),
+    id_transportista: requerirNumero(data.id_transportista, 'id_transportista'),
+    id_piloto: requerirNumero(data.id_piloto, 'id_piloto'),
+    id_camion: requerirNumero(data.id_camion, 'id_camion'),
+    id_producto: requerirNumero(data.id_producto, 'id_producto'),
+    id_bomba: requerirNumero(data.id_bomba, 'id_bomba'),
+    id_poliza: requerirNumero(data.id_poliza, 'id_poliza'),
+    usuario: usuario || 'sistema',
+  };
 
-  const conn = await getPool().getConnection();
   try {
-    await conn.query(
-      'CALL sp_confirmar_despacho_api(?,?,?,?,?,?,?,?, @d1, @d2, @cruce, @msg)',
-      [apiId, idPiloto, idCamion, idTransportista, idProducto, idBomba, idPoliza, usuario || 'sistema']
-    );
-    const [rows] = await conn.query(
-      'SELECT @d1 AS det1, @d2 AS det2, @cruce AS hubo_cruce, @msg AS mensaje'
-    );
-    const out = rows[0] || {};
-    return {
-      det1: out.det1 != null ? Number(out.det1) : null,
-      det2: out.det2 != null ? Number(out.det2) : null,
-      hubo_cruce: Number(out.hubo_cruce) === 1 ? 1 : 0,
-      mensaje: out.mensaje || 'Despacho confirmado.',
-    };
+    const resp = await axios.post(CONFIRM_EXTERNAL_URL, payload, {
+      headers: { 'Content-Type': 'application/json' },
+      timeout: 20000,
+    });
+    // El externo hace SP + saldo + marca 'C' + PDF + correo. Devolvemos su respuesta.
+    return resp.data;
   } catch (e) {
-    // El SP lanza SIGNAL SQLSTATE '45000' en errores de negocio
-    // (ya confirmado, sin factura disponible, saldo insuficiente, etc.).
-    const err = new Error(e.sqlMessage || e.message || 'No se pudo confirmar el despacho.');
-    err.status = 409;
+    const msg =
+      e.response?.data?.mensaje ||
+      e.response?.data?.message ||
+      (e.code === 'ECONNREFUSED' || e.code === 'ECONNABORTED'
+        ? `No se pudo contactar el servicio de confirmación (${CONFIRM_EXTERNAL_URL}).`
+        : e.message) ||
+      'No se pudo confirmar el despacho.';
+    const err = new Error(msg);
+    err.status = e.response?.status || 502;
     throw err;
-  } finally {
-    conn.release();
   }
 }
 

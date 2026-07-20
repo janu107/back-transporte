@@ -14,6 +14,7 @@ const mantenimientosRoutes = require('./mantenimientos.routes');
 const procesosRoutes = require('./procesos.routes');
 const controlApiRoutes = require('./controlApi.routes');
 const viajesRoutes = require('./viajes.routes');
+const anticiposRoutes = require('./anticipos.routes');
 const bitacorasRoutes = require('./bitacoras.routes');
 
 const router = Router();
@@ -28,6 +29,7 @@ router.use('/mantenimientos', mantenimientosRoutes);
 router.use('/procesos', procesosRoutes);
 router.use('/control-api', controlApiRoutes);
 router.use('/viajes', viajesRoutes);
+router.use('/anticipos', anticiposRoutes);
 router.use('/bitacoras', bitacorasRoutes);
 
 // NOTA: las asignaciones usuario-rol se exponen también bajo /usuario-rol
