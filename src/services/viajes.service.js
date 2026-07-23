@@ -18,7 +18,17 @@ const { siguienteCorrelativo } = require('../utils/correlativo');
 // Factor kg->lb de la fórmula del valor: VALOR = ROUND(peso_kg × 0.022046 × tarifa, 2).
 const FACTOR_KG_LB = 0.022046;
 
-const ESTADO_ANULADA = 'ANULADA';
+// El ENUM real de pro_poliza_detalle.estado en el servidor.
+const ESTADOS_VIAJE = ['ACTIVO', 'ANULADO', 'LIQUIDADO'];
+const ESTADO_ANULADA = 'ANULADO';
+
+/** Normaliza el estado a un valor válido del ENUM (default ACTIVO). */
+function normalizarEstadoViaje(v) {
+  let e = String(v || '').toUpperCase();
+  if (e === 'ANULADA') e = 'ANULADO';       // corrige femenino -> ENUM
+  if (e === 'PENDIENTE' || e === '') e = 'ACTIVO';
+  return ESTADOS_VIAJE.includes(e) ? e : 'ACTIVO';
+}
 
 /** Calcula el valor del viaje: peso(kg) × 0.022046 × valor_tarifa, redondeado a 2. */
 function calcularValor(pesoKg, valorTarifa) {
@@ -181,7 +191,7 @@ async function validarYNormalizar(data, excluirCorrelativo = null) {
     cantidad_bultos_piezas: piezas,
     peso,
     valor,
-    estado: nz(data.estado) || 'PENDIENTE',
+    estado: normalizarEstadoViaje(data.estado),
     observaciones: nz(data.observaciones),
   };
 }
@@ -277,12 +287,13 @@ async function actualizar(id, data, usuario) {
   return queryOne('SELECT * FROM `pro_poliza_detalle` WHERE `correlativo` = ?', [correlativo]);
 }
 
-/** Cambia el estado (p.ej. ANULADA). */
+/** Cambia el estado (normaliza al ENUM: ACTIVO/ANULADO/LIQUIDADO). */
 async function cambiarEstado(id, estado, usuario) {
   const correlativo = requerirNumero(id, 'correlativo');
+  const est = normalizarEstadoViaje(estado);
   await execute(
     'UPDATE `pro_poliza_detalle` SET `estado` = ?, `usuario_graba` = ? WHERE `correlativo` = ?',
-    [estado, usuario || 'sistema', correlativo]
+    [est, usuario || 'sistema', correlativo]
   );
   return queryOne('SELECT * FROM `pro_poliza_detalle` WHERE `correlativo` = ?', [correlativo]);
 }
