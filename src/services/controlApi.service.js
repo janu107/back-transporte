@@ -20,7 +20,14 @@ const CONFIRM_EXTERNAL_URL = process.env.CONFIRM_EXTERNAL_URL || 'http://localho
  * Devuelve los vales en estado 'P' que alimenta combustible-api (DieselPlus).
  * Las columnas son las reales de la tabla control_captura_api (api_*).
  */
-async function listarPendientes() {
+async function listarPendientes(idUbicacion) {
+  // [2.1] Filtro opcional por predio/ubicación (se filtra en MySQL, no en React).
+  const params = [];
+  let filtro = '';
+  if (idUbicacion !== undefined && idUbicacion !== null && idUbicacion !== '') {
+    const idU = Number(idUbicacion);
+    if (!Number.isNaN(idU)) { filtro = ' AND c.api_id_ubicacion = ?'; params.push(idU); }
+  }
   return query(
     `SELECT c.api_id, c.api_numero, c.api_num_vale, c.api_fecha, c.api_cant_galones,
             c.api_id_piloto, c.api_licencia, c.api_nombre_piloto, c.api_id_vehiculo,
@@ -28,8 +35,9 @@ async function listarPendientes() {
             c.api_id_ubicacion, u.descripcion AS api_ubicacion_nombre
        FROM control_captura_api c
        LEFT JOIN cat_ubicacion_bomba u ON u.codigo = c.api_id_ubicacion
-      WHERE c.api_estado = 'P'
-      ORDER BY c.api_fecha DESC, c.api_id DESC`
+      WHERE c.api_estado = 'P'${filtro}
+      ORDER BY c.api_fecha DESC, c.api_id DESC`,
+    params
   );
 }
 

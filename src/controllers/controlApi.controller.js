@@ -8,10 +8,10 @@ const { success } = require('../utils/response');
 const userOf = (req) => (req.user && req.user.usuario) || 'sistema';
 
 module.exports = {
-  /** GET /control-api/pendientes — vales en estado 'P'. */
+  /** GET /control-api/pendientes?id_ubicacion= — vales en estado 'P' (filtro opcional por predio). */
   async pendientes(req, res, next) {
     try {
-      success(res, await service.listarPendientes());
+      success(res, await service.listarPendientes(req.query.id_ubicacion));
     } catch (e) {
       next(e);
     }

@@ -32,14 +32,20 @@ module.exports = {
   async updateParametros(req, res, next) {
     try {
       const b = req.body;
+      // valor_galon_combustible: no permitir negativo; si viene vacío se conserva 1.50.
+      const galon = (b.valor_galon_combustible === '' || b.valor_galon_combustible == null)
+        ? 1.50
+        : Math.max(0, Number(b.valor_galon_combustible) || 0);
       await execute(
         `UPDATE con_parametros SET
             nombre_empresa = ?, nit = ?, telefono = ?, correo = ?,
-            iva = ?, porcentaje_pagos = ?, isr = ?, nombre_administrador = ?, usuario_graba = ?
+            iva = ?, porcentaje_pagos = ?, isr = ?, nombre_administrador = ?,
+            valor_galon_combustible = ?, usuario_graba = ?
           WHERE codigo = 1`,
         [
           b.nombre_empresa || null, b.nit || null, b.telefono || null, b.correo || null,
-          b.iva || 0, b.porcentaje_pagos || 0, b.isr || 0, b.nombre_administrador || null, userOf(req),
+          b.iva || 0, b.porcentaje_pagos || 0, b.isr || 0, b.nombre_administrador || null,
+          galon, userOf(req),
         ]
       );
       const row = await queryOne('SELECT * FROM con_parametros WHERE codigo = 1');
