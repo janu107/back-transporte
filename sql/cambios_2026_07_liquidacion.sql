@@ -2,13 +2,14 @@
 --  MIGRACIÓN 2026-07  ·  LIQUIDACIÓN DE PÓLIZAS  ·  SETRASA
 --  1) con_parametros.valor_galon_combustible (valor del galón, parametrizable)
 --  2) pro_sobregiro_transportista (saldos negativos que pasan a la siguiente póliza)
+--  3) asegura la fila única de parámetros (codigo=1)
 --
---  Idempotente: usa information_schema (no depende de ADD COLUMN IF NOT EXISTS).
---  Tipos de FK alineados a los reales: man_poliza.codigo INT, man_transportista.codigo INT.
+--  Idempotente. Compatible con MySQL en modo estricto: el INSERT de parámetros
+--  provee valores para columnas NOT NULL (en el server no tienen default).
 -- =====================================================================
 
 -- ---------------------------------------------------------------------
---  1) valor del galón de combustible en parámetros (fila única codigo=1)
+--  1) valor del galón de combustible en parámetros
 -- ---------------------------------------------------------------------
 SET @existe := (
   SELECT COUNT(*) FROM information_schema.COLUMNS
@@ -22,13 +23,8 @@ SET @sql := IF(@existe = 0,
   'SELECT "con_parametros.valor_galon_combustible ya existe" AS info');
 PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
 
--- Asegura que la fila de parámetros exista (codigo = 1).
-INSERT INTO `con_parametros` (`codigo`, `usuario_graba`)
-SELECT 1, 'sistema'
-WHERE NOT EXISTS (SELECT 1 FROM `con_parametros` WHERE `codigo` = 1);
-
 -- ---------------------------------------------------------------------
---  2) tabla de sobregiros por transportista
+--  2) tabla de sobregiros por transportista  (se crea SIEMPRE, primero)
 -- ---------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS `pro_sobregiro_transportista` (
   `correlativo`      INT NOT NULL AUTO_INCREMENT,
@@ -48,3 +44,14 @@ CREATE TABLE IF NOT EXISTS `pro_sobregiro_transportista` (
   CONSTRAINT `fk_sobregiro_pol_origen` FOREIGN KEY (`id_poliza_origen`) REFERENCES `man_poliza` (`codigo`),
   CONSTRAINT `fk_sobregiro_pol_aplica` FOREIGN KEY (`id_poliza_aplica`) REFERENCES `man_poliza` (`codigo`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ---------------------------------------------------------------------
+--  3) fila única de parámetros (codigo=1) — sólo si no existe.
+--     Se dan valores a las columnas NOT NULL (compatible con modo estricto).
+-- ---------------------------------------------------------------------
+INSERT INTO `con_parametros`
+  (`codigo`, `nombre_empresa`, `nit`, `telefono`, `correo`,
+   `iva`, `porcentaje_pagos`, `isr`, `nombre_administrador`,
+   `valor_galon_combustible`, `usuario_graba`)
+SELECT 1, '', '', '', '', 0.00, 0.00, 0.00, '', 1.50, 'sistema'
+WHERE NOT EXISTS (SELECT 1 FROM `con_parametros` WHERE `codigo` = 1);

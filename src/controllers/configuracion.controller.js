@@ -21,8 +21,15 @@ module.exports = {
     try {
       let row = await queryOne('SELECT * FROM con_parametros WHERE codigo = 1');
       if (!row) {
-        // Crea la fila por defecto si no existe
-        await execute('INSERT INTO con_parametros (codigo, usuario_graba) VALUES (1, ?)', [userOf(req)]);
+        // Crea la fila por defecto si no existe. Se dan valores a las columnas
+        // NOT NULL (en el servidor no tienen default y MySQL corre en modo estricto).
+        await execute(
+          `INSERT INTO con_parametros
+             (codigo, nombre_empresa, nit, telefono, correo,
+              iva, porcentaje_pagos, isr, nombre_administrador, usuario_graba)
+           VALUES (1, '', '', '', '', 0, 0, 0, '', ?)`,
+          [userOf(req)]
+        );
         row = await queryOne('SELECT * FROM con_parametros WHERE codigo = 1');
       }
       success(res, row);
