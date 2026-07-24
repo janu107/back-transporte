@@ -180,9 +180,11 @@ async function confirmar(idPoliza, usuario) {
             cantidad_vale, valor_vales, cantidad_anticipos, valor_anticipos,
             valor_liquidacion, estado, fecha_liquidacion, usuario_graba)
          VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        // pro_liquidaciones.estado en el server es ENUM('PENDIENTE','PAGADA','ANULADA');
+        // la liquidación se registra PENDIENTE (de pago). La póliza sí se cierra LIQUIDADA.
         [numLiq, id, t.id_transportista, t.cantidad_viajes, t.valor_viajes,
           t.cantidad_vale, t.valor_combustible, t.cantidad_anticipos, t.valor_anticipos,
-          t.liquido, 'LIQUIDADA', hoy, user]
+          t.liquido, 'PENDIENTE', hoy, user]
       );
 
       // Aplica los sobregiros anteriores de ese transportista.
