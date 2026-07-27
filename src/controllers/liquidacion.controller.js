@@ -19,6 +19,16 @@ module.exports = {
     }
   },
 
+  async historial(req, res, next) {
+    try { success(res, await service.historial(req.query)); }
+    catch (e) { if (e.status) return error(res, e.message, e.status); next(e); }
+  },
+
+  async detallePoliza(req, res, next) {
+    try { success(res, await service.detallePoliza(req.params.id_poliza)); }
+    catch (e) { if (e.status) return error(res, e.message, e.status); next(e); }
+  },
+
   async confirmar(req, res, next) {
     try {
       // El usuario se toma de la sesión (token), NO del body.

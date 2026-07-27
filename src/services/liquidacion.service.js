@@ -61,7 +61,7 @@ async function construirResumen(idPoliza, runner = query) {
   const combustible = await runner(
     `SELECT id_transportista, COUNT(*) AS cnt, COALESCE(SUM(cantidad),0) AS galones
        FROM pro_detalle_facturas
-      WHERE id_poliza = ?
+      WHERE id_poliza = ? AND estado <> 'ANULADO'
       GROUP BY id_transportista`,
     [idPoliza]
   );
@@ -228,4 +228,45 @@ async function confirmar(idPoliza, usuario) {
   });
 }
 
-module.exports = { resumenPoliza, confirmar };
+/**
+ * historial — lista de liquidaciones guardadas (solo lectura) con filtros opcionales.
+ * @param {object} f { id_poliza, id_transportista, num_liquidacion, fecha_ini, fecha_fin }
+ */
+async function historial(f = {}) {
+  const cond = [];
+  const params = [];
+  if (f.id_poliza) { cond.push('l.id_poliza = ?'); params.push(Number(f.id_poliza)); }
+  if (f.id_transportista) { cond.push('l.id_transportista = ?'); params.push(Number(f.id_transportista)); }
+  if (f.num_liquidacion) { cond.push('l.num_liquidacion LIKE ?'); params.push(`%${f.num_liquidacion}%`); }
+  if (f.fecha_ini) { cond.push('l.fecha_liquidacion >= ?'); params.push(f.fecha_ini); }
+  if (f.fecha_fin) { cond.push('l.fecha_liquidacion <= ?'); params.push(f.fecha_fin); }
+  const where = cond.length ? `WHERE ${cond.join(' AND ')}` : '';
+  return query(
+    `SELECT l.*, p.nombre_poliza, t.nit, t.nombre_comercial
+       FROM pro_liquidaciones l
+       LEFT JOIN man_poliza p ON p.codigo = l.id_poliza
+       LEFT JOIN man_transportista t ON t.codigo = l.id_transportista
+       ${where}
+      ORDER BY l.correlativo DESC`,
+    params
+  );
+}
+
+/** detallePoliza — filas de liquidación de una póliza (para reimprimir). */
+async function detallePoliza(idPoliza) {
+  const id = Number(idPoliza);
+  if (!id) throw errorNegocio('id_poliza inválido.', 400);
+  const poliza = await queryOne('SELECT codigo, nombre_poliza, fecha_liquidacion FROM man_poliza WHERE codigo = ?', [id]);
+  const filas = await query(
+    `SELECT l.*, t.nit, t.nombre_comercial
+       FROM pro_liquidaciones l
+       LEFT JOIN man_transportista t ON t.codigo = l.id_transportista
+      WHERE l.id_poliza = ?
+      ORDER BY t.nombre_comercial`,
+    [id]
+  );
+  if (!filas.length) throw errorNegocio('La póliza no tiene liquidaciones registradas.', 404);
+  return { poliza, transportistas: filas };
+}
+
+module.exports = { resumenPoliza, confirmar, historial, detallePoliza };
