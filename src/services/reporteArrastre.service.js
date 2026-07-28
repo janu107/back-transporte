@@ -57,7 +57,22 @@ async function generar(q = {}) {
   const piezasArrastradas = Number(arrastre.piezas || 0);
   const pesoArrastradoKg = Number(arrastre.peso_kg || 0);
 
-  // --- Detalle (acotado al rango de fechas consultado) ---
+  // --- Saldo corriente: punto de partida = total de la póliza menos lo consumido
+  // por viajes ANTERIORES al rango, para que el saldo de la primera fila del rango
+  // continúe desde donde iba. ---
+  const preCond = ['id_poliza = ?', "estado <> 'ANULADO'", 'fecha < ?'];
+  const preParams = [idPoliza, q.fecha_inicio];
+  if (idPunto) { preCond.push('id_tarifa_embarque = ?'); preParams.push(idPunto); }
+  const previo = await queryOne(
+    `SELECT COALESCE(SUM(cantidad_bultos_piezas),0) AS piezas, COALESCE(SUM(peso),0) AS peso_kg
+       FROM pro_poliza_detalle WHERE ${preCond.join(' AND ')}`,
+    preParams
+  );
+  let saldoPiezasCorr = Number(poliza.cantidad_piezas || 0) - Number(previo.piezas || 0);
+  let saldoPesoCorr = Number(poliza.peso_kilogramos || 0) - Number(previo.peso_kg || 0);
+
+  // --- Detalle (acotado al rango de fechas consultado). Se ordena cronológicamente
+  // (fecha, correlativo) para calcular el saldo corriente fila a fila. ---
   const detCond = ['v.id_poliza = ?', "v.estado <> 'ANULADO'", 'v.fecha BETWEEN ? AND ?'];
   const detParams = [idPoliza, q.fecha_inicio, q.fecha_fin];
   if (idPunto) { detCond.push('v.id_tarifa_embarque = ?'); detParams.push(idPunto); }
@@ -70,11 +85,11 @@ async function generar(q = {}) {
        LEFT JOIN man_camion c ON c.codigo = v.id_camion
        LEFT JOIN man_pilotos p ON p.codigo = v.id_piloto
       WHERE ${detCond.join(' AND ')}
-      ORDER BY v.id_tarifa_embarque, v.fecha, v.correlativo`,
+      ORDER BY v.fecha, v.correlativo`,
     detParams
   );
 
-  // Agrupa por punto de embarque, con totales por grupo.
+  // Agrupa por punto de embarque, con totales por grupo y saldo corriente por fila.
   const gruposMap = new Map();
   filas.forEach((f) => {
     const key = f.id_tarifa_embarque || 0;
@@ -87,14 +102,20 @@ async function generar(q = {}) {
     }
     const g = gruposMap.get(key);
     const pesoKg = Number(f.peso || 0);
+    const piezas = Number(f.cantidad_bultos_piezas || 0);
+    // El saldo corriente decrece con cada carta de porte (orden cronológico).
+    saldoPiezasCorr -= piezas;
+    saldoPesoCorr -= pesoKg;
     g.filas.push({
       correlativo: f.correlativo, num_envio: f.num_envio, fecha: f.fecha,
       piloto: (f.piloto || '').trim(), placa: f.placa,
-      piezas: Number(f.cantidad_bultos_piezas || 0),
+      piezas,
       peso_qq: Number((pesoKg / QQ_A_KG).toFixed(2)),
       peso_kg: pesoKg,
+      saldo_bultos: saldoPiezasCorr,
+      saldo_kg: Number(saldoPesoCorr.toFixed(2)),
     });
-    g.total_piezas += Number(f.cantidad_bultos_piezas || 0);
+    g.total_piezas += piezas;
     g.total_peso_kg += pesoKg;
   });
   const grupos = [...gruposMap.values()].map((g) => ({

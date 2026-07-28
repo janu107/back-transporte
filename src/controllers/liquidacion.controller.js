@@ -29,6 +29,11 @@ module.exports = {
     catch (e) { if (e.status) return error(res, e.message, e.status); next(e); }
   },
 
+  async reporteDetallado(req, res, next) {
+    try { success(res, await service.reporteDetallado(req.params.id_poliza)); }
+    catch (e) { if (e.status) return error(res, e.message, e.status); next(e); }
+  },
+
   async confirmar(req, res, next) {
     try {
       // El usuario se toma de la sesión (token), NO del body.

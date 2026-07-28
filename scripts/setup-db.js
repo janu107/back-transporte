@@ -63,11 +63,23 @@ async function main() {
   const statements = splitStatements(sql);
   logger.info('Instalación SQL iniciada', { file: requestedFile, statements: statements.length });
 
-  // Conexión sin base seleccionada (el script crea/usa la base).
+  // Conexión sin base seleccionada: el instalador completo (app_transporte.sql)
+  // trae su propio CREATE DATABASE/USE. Los archivos de MIGRACIÓN no, así que si
+  // la base ya existe la seleccionamos aquí (evita "No database selected").
   const conn = await mysql.createConnection({
     host: env.DB_HOST, port: env.DB_PORT, user: env.DB_USER, password: env.DB_PASSWORD,
     multipleStatements: false,
   });
+
+  try {
+    await conn.query(`USE \`${env.DB_NAME}\``);
+    logger.info('Base de datos seleccionada', { database: env.DB_NAME });
+  } catch (e) {
+    // La base aún no existe (instalación desde cero); el propio script la creará.
+    logger.warn('No se pudo seleccionar la base; se asume que el script la crea', {
+      database: env.DB_NAME, code: e.code,
+    });
+  }
 
   try {
     let n = 0;

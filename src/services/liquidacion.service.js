@@ -24,6 +24,7 @@ const { siguienteCorrelativo } = require('../utils/correlativo');
 
 const ESTADO_VIAJE_ACTIVO = 'ACTIVO';
 const ESTADO_ANTICIPO_ACTIVO = 'ACTIVO';
+const QQ_A_KG = 45.359237; // 1 quintal = 45.359237 kg (igual que en reporteArrastre)
 
 function errorNegocio(mensaje, status = 409) {
   const e = new Error(mensaje);
@@ -300,4 +301,171 @@ async function detallePoliza(idPoliza) {
   return { poliza, transportistas: filas };
 }
 
-module.exports = { resumenPoliza, confirmar, historial, detallePoliza };
+/**
+ * reporteDetallado — [v5 §2] arma el documento de liquidación con el formato del
+ * PDF: por cada transportista con movimientos, el DETALLE de sus viajes + las
+ * secciones de descuentos (anticipos, combustible, administrativos, aceite) y el
+ * bloque de totales (Total a facturar, −Anticipos, Subtotal, −Suministros,
+ * −Saldo negativo, Total a pagar, Total viajes).
+ *
+ * Los TOTALES del pie salen de pro_liquidaciones (valores ORIGINALES guardados al
+ * confirmar; NO se recalculan, para no alterar históricos). El detalle sale de las
+ * tablas fuente (viajes/anticipos/vales/descuentos), que son inmutables una vez la
+ * póliza está cerrada. Para el combustible, el valor/galón se deriva de
+ * valor_vales ÷ galones para que el detalle sume exactamente el total guardado.
+ */
+async function reporteDetallado(idPoliza) {
+  const id = Number(idPoliza);
+  if (!id) throw errorNegocio('id_poliza inválido.', 400);
+
+  const poliza = await queryOne(
+    'SELECT codigo, nombre_poliza, fecha_liquidacion, estado FROM man_poliza WHERE codigo = ?',
+    [id]
+  );
+  if (!poliza) throw errorNegocio('La póliza no existe.', 404);
+
+  // Totales ORIGINALES por transportista (guardados al confirmar).
+  const liqs = await query(
+    `SELECT l.id_transportista, l.cantidad_viajes, l.valor_viajes, l.valor_vales,
+            l.valor_aceite, l.valor_administrativo, l.sobregiro_anterior,
+            l.valor_anticipos, l.valor_liquidacion, l.usuario_graba,
+            t.nit, t.nombre_comercial
+       FROM pro_liquidaciones l
+       LEFT JOIN man_transportista t ON t.codigo = l.id_transportista
+      WHERE l.id_poliza = ?
+      ORDER BY t.nombre_comercial`,
+    [id]
+  );
+  if (!liqs.length) throw errorNegocio('La póliza no tiene liquidaciones registradas.', 404);
+
+  // Detalle desde las tablas fuente (una consulta por tipo, luego se agrupa en memoria).
+  const viajes = await query(
+    `SELECT v.id_transportista, v.num_envio, v.fecha, v.peso, v.valor,
+            c.placa, CONCAT(p.nombres, ' ', COALESCE(p.apellidos,'')) AS piloto,
+            te.descripcion AS embarque, te.destino
+       FROM pro_poliza_detalle v
+       LEFT JOIN man_camion c ON c.codigo = v.id_camion
+       LEFT JOIN man_pilotos p ON p.codigo = v.id_piloto
+       LEFT JOIN cat_tarifa_embarque te ON te.codigo = v.id_tarifa_embarque
+      WHERE v.id_poliza = ? AND v.estado <> 'ANULADO'
+      ORDER BY v.id_transportista, v.fecha, v.correlativo`,
+    [id]
+  );
+  const anticipos = await query(
+    `SELECT id_transportista, num_anticipo, fecha, descripcion, valor
+       FROM pro_anticipo_provision
+      WHERE id_poliza = ? AND estado = 'ACTIVO'
+      ORDER BY id_transportista, fecha`,
+    [id]
+  );
+  const combustible = await query(
+    `SELECT id_transportista, num_vale, fecha, cantidad
+       FROM pro_detalle_facturas
+      WHERE id_poliza = ? AND estado <> 'ANULADO'
+      ORDER BY id_transportista, fecha`,
+    [id]
+  );
+  const administrativos = await query(
+    `SELECT id_transportista, fecha, descripcion, valor
+       FROM pro_descuento_administrativo
+      WHERE id_poliza = ? AND estado = 'ACTIVO'
+      ORDER BY id_transportista, fecha`,
+    [id]
+  );
+  const aceite = await query(
+    `SELECT id_transportista, fecha, descripcion, valor
+       FROM pro_descuento_aceite
+      WHERE id_poliza = ? AND estado = 'ACTIVO'
+      ORDER BY id_transportista, fecha`,
+    [id]
+  );
+
+  // Agrupadores por transportista.
+  const porTransportista = (rows) => {
+    const m = new Map();
+    rows.forEach((r) => {
+      const k = Number(r.id_transportista);
+      if (!m.has(k)) m.set(k, []);
+      m.get(k).push(r);
+    });
+    return m;
+  };
+  const mViajes = porTransportista(viajes);
+  const mAnt = porTransportista(anticipos);
+  const mComb = porTransportista(combustible);
+  const mAdmin = porTransportista(administrativos);
+  const mAceite = porTransportista(aceite);
+  const kgToQq = (kg) => Number((Number(kg || 0) / QQ_A_KG).toFixed(2));
+
+  const transportistas = liqs.map((l) => {
+    const k = Number(l.id_transportista);
+    const totalCombustible = money(l.valor_vales);
+    const totalAceite = money(l.valor_aceite);
+    const totalAdministrativo = money(l.valor_administrativo);
+    const totalSuministros = money(totalCombustible + totalAceite + totalAdministrativo);
+    const totalAnticipos = money(l.valor_anticipos);
+    const totalFacturar = money(l.valor_viajes);
+    const subtotal = money(totalFacturar - totalAnticipos);
+    const saldoNegativo = money(l.sobregiro_anterior);
+
+    // Combustible: valor/galón derivado para que el detalle sume el total guardado.
+    const galonesTransp = (mComb.get(k) || []).reduce((s, r) => s + Number(r.cantidad || 0), 0);
+    const valorGalonDerivado = galonesTransp > 0 ? totalCombustible / galonesTransp : 0;
+
+    return {
+      id_transportista: k,
+      nit: l.nit || '',
+      nombre: l.nombre_comercial || '',
+      viajes: (mViajes.get(k) || []).map((v) => ({
+        c_porte: v.num_envio,
+        fecha: v.fecha,
+        piloto: (v.piloto || '').trim(),
+        placa: v.placa || '',
+        peso_qq: kgToQq(v.peso),
+        peso_kg: money(v.peso),
+        total_pago: money(v.valor),
+        embarque: v.embarque || '',
+        destino: v.destino || '',
+      })),
+      anticipos: (mAnt.get(k) || []).map((a) => ({
+        num: a.num_anticipo, fecha: a.fecha, descripcion: a.descripcion || '', valor: money(a.valor),
+      })),
+      combustible: (mComb.get(k) || []).map((c) => ({
+        num_vale: c.num_vale, fecha: c.fecha, galones: money(c.cantidad),
+        valor_galon: Number(valorGalonDerivado.toFixed(4)),
+        subtotal: money(Number(c.cantidad || 0) * valorGalonDerivado),
+      })),
+      administrativos: (mAdmin.get(k) || []).map((d) => ({
+        fecha: d.fecha, descripcion: d.descripcion || '', valor: money(d.valor),
+      })),
+      aceite: (mAceite.get(k) || []).map((d) => ({
+        fecha: d.fecha, descripcion: d.descripcion || '', valor: money(d.valor),
+      })),
+      totales: {
+        total_facturar: totalFacturar,
+        total_anticipos: totalAnticipos,
+        subtotal,
+        total_combustible: totalCombustible,
+        total_aceite: totalAceite,
+        total_administrativo: totalAdministrativo,
+        total_suministros: totalSuministros,
+        saldo_negativo: saldoNegativo,
+        total_pagar: money(l.valor_liquidacion),
+        total_viajes: Number(l.cantidad_viajes || 0),
+      },
+    };
+  });
+
+  return {
+    poliza: {
+      codigo: poliza.codigo,
+      nombre_poliza: poliza.nombre_poliza,
+      fecha_liquidacion: poliza.fecha_liquidacion,
+      estado: poliza.estado,
+    },
+    usuario: liqs[0]?.usuario_graba || '',
+    transportistas,
+  };
+}
+
+module.exports = { resumenPoliza, confirmar, historial, detallePoliza, reporteDetallado };

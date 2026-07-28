@@ -58,7 +58,9 @@ SET @existe := (
 SET @sql := IF(@existe = 0,
   'ALTER TABLE `pro_liquidaciones` ADD COLUMN `valor_aceite` DECIMAL(12,2) NOT NULL DEFAULT 0.00 AFTER `valor_vales`',
   'SELECT "pro_liquidaciones.valor_aceite ya existe" AS info');
-PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+PREPARE stmt FROM @sql;
+EXECUTE stmt;
+DEALLOCATE PREPARE stmt;
 
 SET @existe := (
   SELECT COUNT(*) FROM information_schema.COLUMNS
@@ -67,7 +69,9 @@ SET @existe := (
 SET @sql := IF(@existe = 0,
   'ALTER TABLE `pro_liquidaciones` ADD COLUMN `valor_administrativo` DECIMAL(12,2) NOT NULL DEFAULT 0.00 AFTER `valor_aceite`',
   'SELECT "pro_liquidaciones.valor_administrativo ya existe" AS info');
-PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+PREPARE stmt FROM @sql;
+EXECUTE stmt;
+DEALLOCATE PREPARE stmt;
 
 SET @existe := (
   SELECT COUNT(*) FROM information_schema.COLUMNS
@@ -76,4 +80,6 @@ SET @existe := (
 SET @sql := IF(@existe = 0,
   'ALTER TABLE `pro_liquidaciones` ADD COLUMN `sobregiro_anterior` DECIMAL(12,2) NOT NULL DEFAULT 0.00 AFTER `valor_administrativo`',
   'SELECT "pro_liquidaciones.sobregiro_anterior ya existe" AS info');
-PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+PREPARE stmt FROM @sql;
+EXECUTE stmt;
+DEALLOCATE PREPARE stmt;

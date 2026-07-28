@@ -12,6 +12,7 @@ const router = Router();
 router.get('/resumen/:id_poliza', authMiddleware, ctrl.resumen);
 router.get('/historial', authMiddleware, ctrl.historial);
 router.get('/detalle/:id_poliza', authMiddleware, ctrl.detallePoliza);
+router.get('/reporte/:id_poliza', authMiddleware, ctrl.reporteDetallado);
 router.post('/confirmar', authMiddleware, ctrl.confirmar);
 
 module.exports = router;
