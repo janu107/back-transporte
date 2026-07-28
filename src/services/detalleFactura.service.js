@@ -130,4 +130,55 @@ async function cambiarEstado(id, estado, usuario) {
   });
 }
 
-module.exports = { listar, crear, cambiarEstado };
+/**
+ * impresion — [v5] resuelve TODA la información del vale para imprimirlo,
+ * en una sola llamada (evita múltiples consultas desde React) y recalcula el
+ * total en servidor (no confía en lo que ya se haya mostrado en pantalla).
+ * Valida que el vale, la factura, la póliza, el piloto y el camión existan,
+ * y que el transportista realmente corresponda a la placa.
+ */
+async function impresion(id) {
+  const correlativo = requerirNumero(id, 'correlativo');
+  const det = await queryOne('SELECT * FROM pro_detalle_facturas WHERE correlativo = ?', [correlativo]);
+  if (!det) throw errorNegocio('El vale no existe.', 404);
+
+  const factura = await queryOne('SELECT codigo, factura, precio, id_bomba FROM man_facturas_vales WHERE codigo = ?', [det.id_factura_vale]);
+  if (!factura) throw errorNegocio('La factura asociada al vale ya no existe.', 404);
+  const poliza = await queryOne('SELECT codigo, nombre_poliza FROM man_poliza WHERE codigo = ?', [det.id_poliza]);
+  if (!poliza) throw errorNegocio('La póliza asociada al vale ya no existe.', 404);
+  const piloto = await queryOne('SELECT codigo, nombres, apellidos FROM man_pilotos WHERE codigo = ?', [det.id_piloto]);
+  if (!piloto) throw errorNegocio('El piloto asociado al vale ya no existe.', 404);
+  const camion = await queryOne('SELECT codigo, placa, id_transportista FROM man_camion WHERE codigo = ?', [det.id_camion]);
+  if (!camion) throw errorNegocio('El camión asociado al vale ya no existe.', 404);
+  const transportista = await queryOne('SELECT codigo, nit, nombre_comercial FROM man_transportista WHERE codigo = ?', [det.id_transportista]);
+  if (!transportista) throw errorNegocio('El transportista asociado al vale ya no existe.', 404);
+  // Integridad: el transportista guardado en el vale debe ser el de la placa.
+  if (Number(camion.id_transportista) !== Number(transportista.codigo)) {
+    throw errorNegocio('El transportista no corresponde con la placa del vale.', 409);
+  }
+  const bomba = factura.id_bomba
+    ? await queryOne('SELECT descripcion FROM cat_bombas WHERE codigo = ?', [factura.id_bomba])
+    : null;
+
+  // Recalcula el total en servidor (nunca se confía en lo guardado/enviado por el navegador).
+  const precio = Number(factura.precio || 0);
+  const cantidad = Number(det.cantidad || 0);
+  const total = money(cantidad * precio);
+
+  return {
+    numero: det.num_vale,
+    fecha: det.fecha,
+    bomba: bomba ? bomba.descripcion : '',
+    nitTransportista: transportista.nit || '',
+    placa: camion.placa,
+    poliza: poliza.nombre_poliza,
+    transportista: transportista.nombre_comercial,
+    piloto: `${piloto.nombres} ${piloto.apellidos || ''}`.trim(),
+    cantidad,
+    factura: factura.factura,
+    valor: precio,
+    total,
+  };
+}
+
+module.exports = { listar, crear, cambiarEstado, impresion };

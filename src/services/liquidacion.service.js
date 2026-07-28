@@ -7,8 +7,13 @@
  *
  * Fórmulas:
  *   valor_combustible = SUM(pro_detalle_facturas.cantidad) × valor_galon_combustible
- *   total_descuentos  = valor_combustible + valor_anticipos + sobregiro_anterior
+ *   total_descuentos  = valor_combustible + valor_anticipos + valor_aceite
+ *                        + valor_administrativo + sobregiro_anterior
  *   liquido           = valor_viajes − total_descuentos
+ *
+ * [v5] valor_aceite y valor_administrativo salen de pro_descuento_aceite /
+ * pro_descuento_administrativo (estado ACTIVO), tablas de captura manual —
+ * no existe otra fuente de estos montos en el sistema.
  *
  * Para evitar multiplicar filas (relaciones 1→N con viajes, anticipos y combustible)
  * NO se hace un JOIN plano: se agrupa cada fuente por transportista por separado y
@@ -65,6 +70,21 @@ async function construirResumen(idPoliza, runner = query) {
       GROUP BY id_transportista`,
     [idPoliza]
   );
+  // [v5] Descuentos de aceite y administrativos (captura manual, estado ACTIVO).
+  const aceite = await runner(
+    `SELECT id_transportista, COALESCE(SUM(valor),0) AS val
+       FROM pro_descuento_aceite
+      WHERE id_poliza = ? AND estado = 'ACTIVO'
+      GROUP BY id_transportista`,
+    [idPoliza]
+  );
+  const administrativo = await runner(
+    `SELECT id_transportista, COALESCE(SUM(valor),0) AS val
+       FROM pro_descuento_administrativo
+      WHERE id_poliza = ? AND estado = 'ACTIVO'
+      GROUP BY id_transportista`,
+    [idPoliza]
+  );
   // Sobregiros PENDIENTES de cualquier póliza anterior, por transportista.
   const sobregiros = await runner(
     `SELECT id_transportista, COALESCE(SUM(valor_sobregiro),0) AS val
@@ -81,6 +101,7 @@ async function construirResumen(idPoliza, runner = query) {
         id_transportista: k, cantidad_viajes: 0, valor_viajes: 0,
         cantidad_anticipos: 0, valor_anticipos: 0, cantidad_vale: 0,
         total_galones: 0, valor_galon: galon, valor_combustible: 0,
+        valor_aceite: 0, valor_administrativo: 0,
         sobregiro_anterior: 0,
       });
     }
@@ -90,6 +111,8 @@ async function construirResumen(idPoliza, runner = query) {
   viajes.forEach((r) => { const t = ensure(r.id_transportista); t.cantidad_viajes = Number(r.cnt); t.valor_viajes = money(r.val); });
   anticipos.forEach((r) => { const t = ensure(r.id_transportista); t.cantidad_anticipos = Number(r.cnt); t.valor_anticipos = money(r.val); });
   combustible.forEach((r) => { const t = ensure(r.id_transportista); t.cantidad_vale = Number(r.cnt); t.total_galones = money(r.galones); t.valor_combustible = money(Number(r.galones) * galon); });
+  aceite.forEach((r) => { const t = ensure(r.id_transportista); t.valor_aceite = money(r.val); });
+  administrativo.forEach((r) => { const t = ensure(r.id_transportista); t.valor_administrativo = money(r.val); });
   // El sobregiro sólo aplica a transportistas con movimientos en esta póliza.
   sobregiros.forEach((r) => { const k = Number(r.id_transportista); if (map.has(k)) map.get(k).sobregiro_anterior = money(r.val); });
 
@@ -107,7 +130,9 @@ async function construirResumen(idPoliza, runner = query) {
   return ids.map((id) => {
     const t = map.get(id);
     const d = datosMap.get(id) || {};
-    const total_descuentos = money(t.valor_combustible + t.valor_anticipos + t.sobregiro_anterior);
+    const total_descuentos = money(
+      t.valor_combustible + t.valor_anticipos + t.valor_aceite + t.valor_administrativo + t.sobregiro_anterior
+    );
     const liquido = money(t.valor_viajes - total_descuentos);
     return {
       id_transportista: id,
@@ -121,6 +146,8 @@ async function construirResumen(idPoliza, runner = query) {
       total_galones: t.total_galones,
       valor_galon: t.valor_galon,
       valor_combustible: t.valor_combustible,
+      valor_aceite: t.valor_aceite,
+      valor_administrativo: t.valor_administrativo,
       sobregiro_anterior: t.sobregiro_anterior,
       total_descuentos,
       liquido,
@@ -177,14 +204,14 @@ async function confirmar(idPoliza, usuario) {
       await conn.query(
         `INSERT INTO pro_liquidaciones
            (num_liquidacion, id_poliza, id_transportista, cantidad_viajes, valor_viajes,
-            cantidad_vale, valor_vales, cantidad_anticipos, valor_anticipos,
-            valor_liquidacion, estado, fecha_liquidacion, usuario_graba)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+            cantidad_vale, valor_vales, valor_aceite, valor_administrativo, sobregiro_anterior,
+            cantidad_anticipos, valor_anticipos, valor_liquidacion, estado, fecha_liquidacion, usuario_graba)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
         // pro_liquidaciones.estado en el server es ENUM('PENDIENTE','PAGADA','ANULADA');
         // la liquidación se registra PENDIENTE (de pago). La póliza sí se cierra LIQUIDADA.
         [numLiq, id, t.id_transportista, t.cantidad_viajes, t.valor_viajes,
-          t.cantidad_vale, t.valor_combustible, t.cantidad_anticipos, t.valor_anticipos,
-          t.liquido, 'PENDIENTE', hoy, user]
+          t.cantidad_vale, t.valor_combustible, t.valor_aceite, t.valor_administrativo, t.sobregiro_anterior,
+          t.cantidad_anticipos, t.valor_anticipos, t.liquido, 'PENDIENTE', hoy, user]
       );
 
       // Aplica los sobregiros anteriores de ese transportista.
@@ -196,6 +223,10 @@ async function confirmar(idPoliza, usuario) {
           [id, t.id_transportista]
         );
       }
+
+      // Nota: no se cambia el estado de los descuentos de aceite/administrativo aquí
+      // (igual que los anticipos). El candado real contra doble conteo es que la
+      // póliza se cierra (LIQUIDADA) y ya no admite una segunda confirmación.
 
       // Si el líquido es negativo, registra nuevo sobregiro PENDIENTE.
       if (t.liquido < 0) {

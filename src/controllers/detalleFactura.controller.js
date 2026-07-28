@@ -22,4 +22,9 @@ module.exports = {
       success(res, row, 'Estado actualizado correctamente');
     } catch (e) { next(e); }
   },
+
+  /** GET /detalle-factura/:id/impresion — [v5] datos listos para imprimir el vale. */
+  async impresion(req, res, next) {
+    try { success(res, await service.impresion(req.params.id)); } catch (e) { next(e); }
+  },
 };

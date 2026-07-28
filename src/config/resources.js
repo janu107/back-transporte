@@ -71,7 +71,19 @@ const RESOURCES = {
   liquidaciones: {
     table: 'pro_liquidaciones', pk: 'correlativo',
     columns: ['num_liquidacion', 'id_poliza', 'id_transportista', 'cantidad_viajes', 'valor_viajes', 'cantidad_vale',
-      'valor_vales', 'cantidad_anticipos', 'valor_anticipos', 'valor_liquidacion', 'estado', 'fecha_liquidacion'],
+      'valor_vales', 'valor_aceite', 'valor_administrativo', 'sobregiro_anterior',
+      'cantidad_anticipos', 'valor_anticipos', 'valor_liquidacion', 'estado', 'fecha_liquidacion'],
+    hasEstado: true,
+  },
+  // [v5] Descuentos que se restan en la Liquidación (además de anticipos y combustible).
+  'descuento-aceite': {
+    table: 'pro_descuento_aceite', pk: 'correlativo',
+    columns: ['id_poliza', 'id_transportista', 'fecha', 'valor', 'descripcion', 'estado'],
+    hasEstado: true,
+  },
+  'descuento-administrativo': {
+    table: 'pro_descuento_administrativo', pk: 'correlativo',
+    columns: ['id_poliza', 'id_transportista', 'fecha', 'valor', 'descripcion', 'estado'],
     hasEstado: true,
   },
 
