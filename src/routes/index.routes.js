@@ -19,6 +19,7 @@ const liquidacionRoutes = require('./liquidacion.routes');
 const detalleFacturaRoutes = require('./detalleFactura.routes');
 const reportesRoutes = require('./reportes.routes');
 const dashboardRoutes = require('./dashboard.routes');
+const historialRoutes = require('./historial.routes');
 const bitacorasRoutes = require('./bitacoras.routes');
 
 const router = Router();
@@ -38,6 +39,7 @@ router.use('/liquidacion', liquidacionRoutes);
 router.use('/detalle-factura', detalleFacturaRoutes);
 router.use('/reportes', reportesRoutes);
 router.use('/dashboard', dashboardRoutes);
+router.use('/historial', historialRoutes);
 router.use('/bitacoras', bitacorasRoutes);
 
 // NOTA: las asignaciones usuario-rol se exponen también bajo /usuario-rol
