@@ -2,13 +2,23 @@
  * anticipos.controller.js — ANTICIPOS / PROVISIÓN (pro_anticipo_provision).
  */
 const service = require('../services/anticipos.service');
-const { success } = require('../utils/response');
+const { success, error } = require('../utils/response');
 
 const userOf = (req) => (req.user && req.user.usuario) || 'sistema';
 
 module.exports = {
   async list(req, res, next) {
     try { success(res, await service.listar()); } catch (e) { next(e); }
+  },
+  // [v7 §5] Reimpresión: busca por número de vale y/o placa.
+  async buscarReimpresion(req, res, next) {
+    try { success(res, await service.buscarReimpresion(req.query)); }
+    catch (e) { if (e.status) return error(res, e.message, e.status); next(e); }
+  },
+  // [v7 §4] Datos del vale resueltos en servidor para imprimir.
+  async impresion(req, res, next) {
+    try { success(res, await service.impresion(req.params.id)); }
+    catch (e) { if (e.status) return error(res, e.message, e.status); next(e); }
   },
   async create(req, res, next) {
     try {

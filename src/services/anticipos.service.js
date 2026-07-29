@@ -130,4 +130,65 @@ async function cambiarEstado(id, estado, usuario) {
   return queryOne('SELECT * FROM `pro_anticipo_provision` WHERE `correlativo` = ?', [correlativo]);
 }
 
-module.exports = { listar, crear, actualizar, cambiarEstado };
+/* ============ [v7 §4/§5] IMPRESIÓN / REIMPRESIÓN DEL VALE DE ANTICIPO ============ */
+
+// SELECT base con los nombres ya resueltos (evita componer datos en el navegador).
+const SELECT_VALE = `
+  SELECT a.correlativo, a.num_anticipo, a.fecha, a.valor, a.estado, a.descripcion,
+         p.nombre_poliza, c.placa, t.nombre_comercial AS transportista,
+         TRIM(CONCAT(pi.nombres, ' ', COALESCE(pi.apellidos, ''))) AS piloto,
+         ta.descripcion AS tipo
+    FROM pro_anticipo_provision a
+    LEFT JOIN man_poliza p ON p.codigo = a.id_poliza
+    LEFT JOIN man_camion c ON c.codigo = a.id_camion
+    LEFT JOIN man_transportista t ON t.codigo = a.id_transportista
+    LEFT JOIN man_pilotos pi ON pi.codigo = a.id_piloto
+    LEFT JOIN cat_tipo_anticipo_provision ta ON ta.codigo = a.id_tipo_anticipo_provision`;
+
+// Da forma a los datos que consume imprimirValeAnticipo() en el frontend.
+function mapVale(r) {
+  return {
+    correlativo: r.correlativo,
+    numero: r.num_anticipo,
+    fecha: r.fecha,
+    poliza: r.nombre_poliza || '',
+    placa: r.placa || '',
+    transportista: r.transportista || '',
+    piloto: r.piloto || '',
+    tipo: r.tipo || '',
+    descripcion: r.descripcion || '',
+    total: Number(r.valor || 0),
+    estado: r.estado,
+  };
+}
+
+/** Resuelve TODOS los datos del vale de un anticipo (para imprimir), validado en servidor. */
+async function impresion(id) {
+  const correlativo = requerirNumero(id, 'correlativo');
+  const row = await queryOne(`${SELECT_VALE} WHERE a.correlativo = ?`, [correlativo]);
+  if (!row) throw errorNegocio('El anticipo no existe.', 404);
+  return mapVale(row);
+}
+
+/**
+ * buscarReimpresion — [v7 §5] busca anticipos para reimprimir por número de vale
+ * (num_anticipo) y/o placa. Devuelve los datos ya resueltos para imprimir.
+ */
+async function buscarReimpresion({ vale, placa } = {}) {
+  const v = (vale || '').trim();
+  const pl = (placa || '').trim();
+  if (!v && !pl) throw errorNegocio('Indique el número de vale o la placa a buscar.', 400);
+
+  const cond = [];
+  const params = [];
+  if (v) { cond.push('a.num_anticipo LIKE ?'); params.push(`%${v}%`); }
+  if (pl) { cond.push('c.placa LIKE ?'); params.push(`%${pl}%`); }
+
+  const rows = await query(
+    `${SELECT_VALE} WHERE ${cond.join(' AND ')} ORDER BY a.correlativo DESC LIMIT 100`,
+    params
+  );
+  return rows.map(mapVale);
+}
+
+module.exports = { listar, crear, actualizar, cambiarEstado, impresion, buscarReimpresion };
