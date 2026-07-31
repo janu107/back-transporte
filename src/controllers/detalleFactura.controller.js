@@ -2,7 +2,7 @@
  * detalleFactura.controller.js — DETALLE DE FACTURA (P14, pro_detalle_facturas).
  */
 const service = require('../services/detalleFactura.service');
-const { success } = require('../utils/response');
+const { success, error } = require('../utils/response');
 
 const userOf = (req) => (req.user && req.user.usuario) || 'sistema';
 
@@ -26,5 +26,15 @@ module.exports = {
   /** GET /detalle-factura/:id/impresion — [v5] datos listos para imprimir el vale. */
   async impresion(req, res, next) {
     try { success(res, await service.impresion(req.params.id)); } catch (e) { next(e); }
+  },
+  /** GET /detalle-factura/por-api/:apiId — [v8] vale(s) generado(s) al confirmar un despacho. */
+  async impresionPorApi(req, res, next) {
+    try { success(res, await service.impresionPorApi(req.params.apiId)); }
+    catch (e) { if (e.status) return error(res, e.message, e.status); next(e); }
+  },
+  /** GET /detalle-factura/reimpresion?vale=&placa= — [v8] reimpresión por vale/placa. */
+  async buscarReimpresion(req, res, next) {
+    try { success(res, await service.buscarReimpresion(req.query)); }
+    catch (e) { if (e.status) return error(res, e.message, e.status); next(e); }
   },
 };

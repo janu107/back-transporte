@@ -12,6 +12,8 @@ const authMiddleware = require('../middlewares/auth.middleware');
 const router = Router();
 
 router.get('/', authMiddleware, ctrl.list);
+router.get('/reimpresion', authMiddleware, ctrl.buscarReimpresion); // antes de /:id/...
+router.get('/por-api/:apiId', authMiddleware, ctrl.impresionPorApi);
 router.get('/:id/impresion', authMiddleware, ctrl.impresion);
 router.post('/', authMiddleware, ctrl.create);
 router.patch('/:id/estado', authMiddleware, ctrl.changeEstado);

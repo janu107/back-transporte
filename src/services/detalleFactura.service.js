@@ -181,4 +181,66 @@ async function impresion(id) {
   };
 }
 
-module.exports = { listar, crear, cambiarEstado, impresion };
+/* ============ [v8 §4] IMPRESIÓN POR API / REIMPRESIÓN DEL VALE DE COMBUSTIBLE ============ */
+
+const SELECT_VALE_COMB = `
+  SELECT d.correlativo, d.num_vale, d.fecha, d.cantidad,
+         f.factura, f.precio, b.descripcion AS bomba,
+         p.nombre_poliza, c.placa, t.nit, t.nombre_comercial AS transportista,
+         TRIM(CONCAT(pi.nombres, ' ', COALESCE(pi.apellidos, ''))) AS piloto,
+         d.estado
+    FROM pro_detalle_facturas d
+    LEFT JOIN man_facturas_vales f ON f.codigo = d.id_factura_vale
+    LEFT JOIN cat_bombas b ON b.codigo = f.id_bomba
+    LEFT JOIN man_poliza p ON p.codigo = d.id_poliza
+    LEFT JOIN man_camion c ON c.codigo = d.id_camion
+    LEFT JOIN man_transportista t ON t.codigo = d.id_transportista
+    LEFT JOIN man_pilotos pi ON pi.codigo = d.id_piloto`;
+
+// Da forma a los datos que consume imprimirValeCombustible(); recalcula el total.
+function mapValeComb(r) {
+  const precio = Number(r.precio || 0);
+  const cantidad = Number(r.cantidad || 0);
+  return {
+    correlativo: r.correlativo,
+    numero: r.num_vale,
+    fecha: r.fecha,
+    bomba: r.bomba || '',
+    nitTransportista: r.nit || '',
+    placa: r.placa || '',
+    poliza: r.nombre_poliza || '',
+    transportista: r.transportista || '',
+    piloto: r.piloto || '',
+    cantidad,
+    factura: r.factura || '',
+    valor: precio,
+    total: money(cantidad * precio),
+    estado: r.estado,
+  };
+}
+
+/** [v8 §4] Vale(s) generado(s) al confirmar un despacho del API (1 o 2 si hubo cruce). */
+async function impresionPorApi(apiId) {
+  const id = requerirNumero(apiId, 'api_id');
+  const rows = await query(`${SELECT_VALE_COMB} WHERE d.id_api_origen = ? ORDER BY d.correlativo`, [id]);
+  if (!rows.length) throw errorNegocio('No se encontró el vale generado para este despacho.', 404);
+  return rows.map(mapValeComb);
+}
+
+/** [v8 §4] Reimpresión de vales de combustible por número de vale y/o placa. */
+async function buscarReimpresion({ vale, placa } = {}) {
+  const v = (vale || '').trim();
+  const pl = (placa || '').trim();
+  if (!v && !pl) throw errorNegocio('Indique el número de vale o la placa a buscar.', 400);
+  const cond = [];
+  const params = [];
+  if (v) { cond.push('d.num_vale LIKE ?'); params.push(`%${v}%`); }
+  if (pl) { cond.push('c.placa LIKE ?'); params.push(`%${pl}%`); }
+  const rows = await query(
+    `${SELECT_VALE_COMB} WHERE ${cond.join(' AND ')} ORDER BY d.correlativo DESC LIMIT 100`,
+    params
+  );
+  return rows.map(mapValeComb);
+}
+
+module.exports = { listar, crear, cambiarEstado, impresion, impresionPorApi, buscarReimpresion };
