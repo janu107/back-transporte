@@ -22,31 +22,46 @@ const dashboardRoutes = require('./dashboard.routes');
 const historialRoutes = require('./historial.routes');
 const bitacorasRoutes = require('./bitacoras.routes');
 
+// [v8] Autenticación + autorización por rol a nivel de módulo.
+const auth = require('../middlewares/auth.middleware');
+const { permitirRoles, soloLecturaPara } = require('../middlewares/role.middleware');
+
 const router = Router();
 
+// Públicos
 router.use('/health', healthRoutes);
 router.use('/auth', authRoutes);
-router.use('/usuarios', usuariosRoutes);
-router.use('/roles', rolesRoutes);
-router.use('/catalogos', catalogosRoutes);
-router.use('/configuracion', configuracionRoutes);
-router.use('/mantenimientos', mantenimientosRoutes);
-router.use('/procesos', procesosRoutes);
-router.use('/control-api', controlApiRoutes);
-router.use('/viajes', viajesRoutes);
-router.use('/anticipos', anticiposRoutes);
-router.use('/liquidacion', liquidacionRoutes);
-router.use('/detalle-factura', detalleFacturaRoutes);
-router.use('/reportes', reportesRoutes);
-router.use('/dashboard', dashboardRoutes);
-router.use('/historial', historialRoutes);
-router.use('/bitacoras', bitacorasRoutes);
 
-// NOTA: las asignaciones usuario-rol se exponen también bajo /usuario-rol
+// Seguridad / Configuración / Auditoría / Historial / Reportes -> solo ADMIN
+router.use('/usuarios', auth, permitirRoles(), usuariosRoutes);
+router.use('/roles', auth, permitirRoles(), rolesRoutes);
+router.use('/configuracion', auth, permitirRoles(), configuracionRoutes);
+router.use('/reportes', auth, permitirRoles(), reportesRoutes);
+router.use('/historial', auth, permitirRoles(), historialRoutes);
+router.use('/bitacoras', auth, permitirRoles(), bitacorasRoutes);
+
+// Catálogos -> ADMIN + OPERADOR (escritura); CONSULTOR solo lectura
+router.use('/catalogos', auth, permitirRoles('OPERADOR', 'CONSULTOR'), soloLecturaPara('CONSULTOR'), catalogosRoutes);
+
+// Mantenimientos -> ADMIN (escritura); OPERADOR solo lectura (para los combos de Procesos)
+router.use('/mantenimientos', auth, permitirRoles('OPERADOR'), soloLecturaPara('OPERADOR'), mantenimientosRoutes);
+
+// Procesos -> ADMIN + OPERADOR
+router.use('/procesos', auth, permitirRoles('OPERADOR'), procesosRoutes);
+router.use('/control-api', auth, permitirRoles('OPERADOR'), controlApiRoutes);
+router.use('/viajes', auth, permitirRoles('OPERADOR'), viajesRoutes);
+router.use('/anticipos', auth, permitirRoles('OPERADOR'), anticiposRoutes);
+router.use('/liquidacion', auth, permitirRoles('OPERADOR'), liquidacionRoutes);
+router.use('/detalle-factura', auth, permitirRoles('OPERADOR'), detalleFacturaRoutes);
+
+// Dashboard -> todos los roles (es la pantalla de inicio)
+router.use('/dashboard', auth, permitirRoles('OPERADOR', 'CONSULTOR'), dashboardRoutes);
+
+// NOTA: las asignaciones usuario-rol se exponen también bajo /usuario-rol -> solo ADMIN
 const rolesController = require('../controllers/roles.controller');
-router.get('/usuario-rol', rolesController.listUsuarioRol);
-router.post('/usuario-rol', rolesController.createUsuarioRol);
-router.put('/usuario-rol/:id', rolesController.updateUsuarioRol);
-router.patch('/usuario-rol/:id/estado', rolesController.changeEstadoUsuarioRol);
+router.get('/usuario-rol', auth, permitirRoles(), rolesController.listUsuarioRol);
+router.post('/usuario-rol', auth, permitirRoles(), rolesController.createUsuarioRol);
+router.put('/usuario-rol/:id', auth, permitirRoles(), rolesController.updateUsuarioRol);
+router.patch('/usuario-rol/:id/estado', auth, permitirRoles(), rolesController.changeEstadoUsuarioRol);
 
 module.exports = router;
