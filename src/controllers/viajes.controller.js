@@ -52,4 +52,21 @@ module.exports = {
       success(res, row, 'Estado actualizado correctamente');
     } catch (e) { next(e); }
   },
+
+  /** GET /viajes/poliza/:idPoliza/tarifas — tarifas usadas por los envíos de la póliza. */
+  async tarifasPoliza(req, res, next) {
+    try {
+      success(res, await service.tarifasDePoliza(req.params.idPoliza));
+    } catch (e) { next(e); }
+  },
+
+  /** POST /viajes/poliza/:idPoliza/retarifar — recalcula el valor de los envíos con una tarifa. */
+  async retarifar(req, res, next) {
+    try {
+      const r = await service.retarifarPoliza(
+        req.params.idPoliza, req.body.id_tarifa_embarque, req.body.nueva_tarifa, userOf(req)
+      );
+      success(res, r, `Se actualizaron ${r.actualizados} envío(s).`);
+    } catch (e) { next(e); }
+  },
 };

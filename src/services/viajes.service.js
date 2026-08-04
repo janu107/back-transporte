@@ -14,8 +14,11 @@
  */
 const { query, queryOne, execute, withTransaction } = require('../database/db');
 const { siguienteCorrelativo } = require('../utils/correlativo');
+const { obtenerPorcentajePagos } = require('./configuracion.service');
 
-// Factor kg->lb de la fórmula del valor: VALOR = ROUND(peso_kg × 0.022046 × tarifa, 2).
+// Factor kg->lb de la fórmula del valor: VALOR = ROUND(peso_kg × factor × tarifa, 2).
+// [2026-08 §8] El factor ahora proviene del parámetro "Porcentaje de pagos"
+// (con_parametros); esta constante queda como respaldo por defecto.
 const FACTOR_KG_LB = 0.022046;
 
 // El ENUM real de pro_poliza_detalle.estado en el servidor.
@@ -30,9 +33,11 @@ function normalizarEstadoViaje(v) {
   return ESTADOS_VIAJE.includes(e) ? e : 'ACTIVO';
 }
 
-/** Calcula el valor del viaje: peso(kg) × 0.022046 × valor_tarifa, redondeado a 2. */
-function calcularValor(pesoKg, valorTarifa) {
-  return Number((Number(pesoKg || 0) * FACTOR_KG_LB * Number(valorTarifa || 0)).toFixed(2));
+/** Calcula el valor del viaje: peso(kg) × factor × valor_tarifa, redondeado a 2.
+ *  `factor` = "Porcentaje de pagos" del parámetro (default 0.022046). */
+function calcularValor(pesoKg, valorTarifa, factor = FACTOR_KG_LB) {
+  const f = Number(factor);
+  return Number((Number(pesoKg || 0) * (Number.isFinite(f) && f > 0 ? f : FACTOR_KG_LB) * Number(valorTarifa || 0)).toFixed(2));
 }
 
 /** Normaliza '' | undefined -> null. */
@@ -176,7 +181,8 @@ async function validarYNormalizar(data, excluirCorrelativo = null) {
     }
     valorTarifa = Number(tarifa.valor || 0);
   }
-  const valor = calcularValor(peso, valorTarifa);
+  const factor = await obtenerPorcentajePagos();
+  const valor = calcularValor(peso, valorTarifa, factor);
 
   return {
     num_envio: nz(data.num_envio),
@@ -206,10 +212,25 @@ const COLUMNAS_INSERT = [
 async function crear(data, usuario) {
   const row = await validarYNormalizar(data, null);
   const anio = new Date().getFullYear();
+  // [2026-08 §5] Viaje local -> se respeta el número de envío escrito a mano.
+  const esLocal = String(row.tipo || '').toLowerCase().includes('local');
+  const envioManual = row.num_envio != null && String(row.num_envio).trim() !== '';
 
   return withTransaction(async (conn) => {
-    // [M5.3] Correlativo AÑO+00000 generado en servidor (ignora lo que envíe el cliente).
-    row.num_envio = await siguienteCorrelativo(conn, 'pro_poliza_detalle', 'num_envio', anio);
+    if (esLocal && envioManual) {
+      // Evita duplicar el número de envío escrito por el usuario.
+      const [dup] = await conn.query(
+        'SELECT correlativo FROM `pro_poliza_detalle` WHERE `num_envio` = ? LIMIT 1',
+        [String(row.num_envio).trim()]
+      );
+      if (dup && dup.length) {
+        throw errorNegocio(`El número de envío "${row.num_envio}" ya existe.`, 409);
+      }
+      row.num_envio = String(row.num_envio).trim();
+    } else {
+      // Carta de Porte / Exportación (o local sin número): correlativo AÑO+00000 en servidor.
+      row.num_envio = await siguienteCorrelativo(conn, 'pro_poliza_detalle', 'num_envio', anio);
+    }
 
     const cols = [...COLUMNAS_INSERT, 'usuario_graba'];
     const vals = [...COLUMNAS_INSERT.map((c) => row[c]), usuario || 'sistema'];
@@ -260,7 +281,8 @@ async function validarCalcular(data) {
   if (!tarifa || String(tarifa.estado).toUpperCase() !== 'ACTIVO') {
     throw errorNegocio('Tarifa de embarque no encontrada o inactiva');
   }
-  const valor = calcularValor(peso, tarifa.valor);
+  const factor = await obtenerPorcentajePagos();
+  const valor = calcularValor(peso, tarifa.valor, factor);
   return {
     saldo_piezas: saldo,
     valor,
@@ -287,6 +309,74 @@ async function actualizar(id, data, usuario) {
   return queryOne('SELECT * FROM `pro_poliza_detalle` WHERE `correlativo` = ?', [correlativo]);
 }
 
+/**
+ * tarifasDePoliza — [2026-08 §2] Tarifas de embarque usadas por los envíos de una
+ * póliza (para el modal "Retarifar"). Agrupa por tarifa con # de envíos, peso y
+ * valor acumulado. Solo envíos NO anulados.
+ */
+async function tarifasDePoliza(idPoliza) {
+  const id = requerirNumero(idPoliza, 'id_poliza');
+  return query(
+    `SELECT d.id_tarifa_embarque,
+            t.origen, t.destino, t.valor AS valor_tarifa,
+            COUNT(*)                    AS num_envios,
+            COALESCE(SUM(d.peso), 0)    AS suma_peso,
+            COALESCE(SUM(d.valor), 0)   AS suma_valor
+       FROM pro_poliza_detalle d
+       LEFT JOIN cat_tarifa_embarque t ON t.codigo = d.id_tarifa_embarque
+      WHERE d.id_poliza = ? AND d.estado <> ? AND d.id_tarifa_embarque IS NOT NULL
+      GROUP BY d.id_tarifa_embarque, t.origen, t.destino, t.valor
+      ORDER BY num_envios DESC`,
+    [id, ESTADO_ANULADA]
+  );
+}
+
+/**
+ * retarifarPoliza — [2026-08 §2] Recalcula el VALOR de todos los envíos NO anulados
+ * de la póliza que usan la tarifa indicada, con la fórmula:
+ *   valor = peso × porcentaje_pagos × nueva_tarifa
+ * Guarda el resultado en pro_poliza_detalle.valor. Devuelve cuántos se actualizaron.
+ */
+async function retarifarPoliza(idPoliza, idTarifa, nuevaTarifa, usuario) {
+  const id = requerirNumero(idPoliza, 'id_poliza');
+  const tar = requerirNumero(idTarifa, 'id_tarifa_embarque');
+  const nueva = Number(nuevaTarifa);
+  if (!Number.isFinite(nueva) || nueva < 0) {
+    throw errorNegocio('El valor de la nueva tarifa no es válido.', 400);
+  }
+
+  const factor = await obtenerPorcentajePagos();
+
+  return withTransaction(async (conn) => {
+    const [envios] = await conn.query(
+      `SELECT correlativo, peso FROM \`pro_poliza_detalle\`
+        WHERE id_poliza = ? AND id_tarifa_embarque = ? AND estado <> ?`,
+      [id, tar, ESTADO_ANULADA]
+    );
+    if (!envios.length) {
+      throw errorNegocio('No hay envíos con esa tarifa en la póliza para actualizar.', 404);
+    }
+    let actualizados = 0;
+    let totalValor = 0;
+    for (const e of envios) {
+      const valor = calcularValor(e.peso, nueva, factor);
+      // eslint-disable-next-line no-await-in-loop
+      await conn.query(
+        'UPDATE `pro_poliza_detalle` SET `valor` = ?, `usuario_graba` = ? WHERE `correlativo` = ?',
+        [valor, usuario || 'sistema', e.correlativo]
+      );
+      actualizados += 1;
+      totalValor += valor;
+    }
+    return {
+      actualizados,
+      total_valor: Number(totalValor.toFixed(2)),
+      nueva_tarifa: nueva,
+      factor,
+    };
+  });
+}
+
 /** Cambia el estado (normaliza al ENUM: ACTIVO/ANULADO/LIQUIDADO). */
 async function cambiarEstado(id, estado, usuario) {
   const correlativo = requerirNumero(id, 'correlativo');
@@ -306,4 +396,6 @@ module.exports = {
   crear,
   actualizar,
   cambiarEstado,
+  tarifasDePoliza,
+  retarifarPoliza,
 };

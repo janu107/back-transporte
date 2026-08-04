@@ -9,6 +9,8 @@ const authMiddleware = require('../middlewares/auth.middleware');
 const reporteDiesel = require('../services/reporteDiesel.service');
 const reporteArrastre = require('../services/reporteArrastre.service');
 const reporteViajesPoliza = require('../services/reporteViajesPoliza.service');
+const reportePolizasPendientes = require('../services/reportePolizasPendientes.service');
+const reporteAnticiposPoliza = require('../services/reporteAnticiposPoliza.service');
 const { success, error } = require('../utils/response');
 
 const router = Router();
@@ -34,6 +36,26 @@ router.get('/arrastre-polizas', authMiddleware, async (req, res, next) => {
 router.get('/viajes-poliza', authMiddleware, async (req, res, next) => {
   try {
     success(res, await reporteViajesPoliza.generar(req.query));
+  } catch (e) {
+    if (e.status) return error(res, e.message, e.status);
+    next(e);
+  }
+});
+
+// [2026-08 §10] Pólizas pendientes por liquidar (filtro por estados).
+router.get('/polizas-pendientes', authMiddleware, async (req, res, next) => {
+  try {
+    success(res, await reportePolizasPendientes.generar(req.query));
+  } catch (e) {
+    if (e.status) return error(res, e.message, e.status);
+    next(e);
+  }
+});
+
+// [2026-08 §11] Anticipos a transportistas por póliza / arrastre.
+router.get('/anticipos-poliza', authMiddleware, async (req, res, next) => {
+  try {
+    success(res, await reporteAnticiposPoliza.generar(req.query));
   } catch (e) {
     if (e.status) return error(res, e.message, e.status);
     next(e);

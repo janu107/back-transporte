@@ -10,8 +10,10 @@ function bad(mensaje) { const e = new Error(mensaje); e.status = 400; return e; 
 
 /**
  * @param {object} q { tipo, valor, estado_poliza, fecha_ini, fecha_fin }
- *   tipo: TODO | POLIZA | TRANSPORTISTA
+ *   tipo: TODO | POLIZA | TRANSPORTISTA | FACTURA
  *   estado_poliza: AMBAS | ACTIVA | LIQUIDADA
+ * [2026-08 §9a] Las fechas son OPCIONALES (para el reporte de arrastre de diesel
+ * por factura, que filtra por factura + estado de póliza sin rango de fechas).
  */
 async function generar(q = {}) {
   const tipo = String(q.tipo || 'TODO').toUpperCase();
@@ -19,20 +21,22 @@ async function generar(q = {}) {
   const fIni = q.fecha_ini;
   const fFin = q.fecha_fin;
 
-  if (!fIni || !fFin) throw bad('Las fechas inicial y final son obligatorias.');
-  if (fIni > fFin) throw bad('La fecha inicial no puede ser posterior a la final.');
-  if ((tipo === 'POLIZA' || tipo === 'TRANSPORTISTA') && !q.valor) {
+  if (fIni && fFin && fIni > fFin) throw bad('La fecha inicial no puede ser posterior a la final.');
+  if ((tipo === 'POLIZA' || tipo === 'TRANSPORTISTA' || tipo === 'FACTURA') && !q.valor) {
     throw bad(`Debe indicar el valor del filtro para tipo ${tipo}.`);
   }
 
-  const cond = ['d.fecha BETWEEN ? AND ?', "d.estado <> 'ANULADO'"];
-  const params = [fIni, fFin];
+  const cond = ["d.estado <> 'ANULADO'"];
+  const params = [];
+  // Rango de fechas solo si se proporcionan ambas.
+  if (fIni && fFin) { cond.push('d.fecha BETWEEN ? AND ?'); params.push(fIni, fFin); }
 
   if (estado === 'ACTIVA') cond.push("po.estado = 'ABIERTA'");
   else if (estado === 'LIQUIDADA') cond.push("po.estado = 'LIQUIDADA'");
 
   if (tipo === 'POLIZA') { cond.push('(po.nombre_poliza = ? OR po.codigo = ?)'); params.push(q.valor, q.valor); }
   else if (tipo === 'TRANSPORTISTA') { cond.push('(t.codigo = ? OR t.nombre_comercial = ?)'); params.push(q.valor, q.valor); }
+  else if (tipo === 'FACTURA') { cond.push('(f.factura = ? OR f.codigo = ?)'); params.push(q.valor, q.valor); }
 
   const rows = await query(
     `SELECT d.correlativo AS id_detalle, d.id_factura_vale AS id_factura, d.num_vale,

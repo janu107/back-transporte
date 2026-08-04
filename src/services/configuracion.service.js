@@ -1,18 +1,28 @@
 /**
  * configuracion.service.js
- * Lógica de negocio de Configuración - uso futuro.
+ * Helpers de Configuración reutilizables por otros módulos.
  * Tablas: con_empresas, con_parametros (fila única codigo=1).
  */
-// const { getPool } = require('../database/pool');
+const { queryOne } = require('../database/db');
 
-async function listarEmpresas() {
-  throw new Error('configuracion.service.listarEmpresas no implementado en esta fase.');
-}
-async function getParametros() {
-  throw new Error('configuracion.service.getParametros no implementado en esta fase.');
-}
-async function actualizarParametros(data) {
-  throw new Error('configuracion.service.actualizarParametros no implementado en esta fase.');
+// Factor por defecto de la fórmula del valor (kg->lb) si el parámetro no existe.
+const FACTOR_DEFECTO = 0.022046;
+
+/**
+ * Devuelve el "Porcentaje de pagos" (con_parametros.codigo=1) como número.
+ * Es el FACTOR de la fórmula del valor de envío:
+ *   VALOR = peso(kg) × porcentaje_pagos × tarifa.
+ * Si no hay fila o el valor es 0/NULL, cae al factor por defecto 0.022046.
+ * @returns {Promise<number>}
+ */
+async function obtenerPorcentajePagos() {
+  try {
+    const row = await queryOne('SELECT porcentaje_pagos FROM con_parametros WHERE codigo = 1');
+    const v = Number(row && row.porcentaje_pagos);
+    return Number.isFinite(v) && v > 0 ? v : FACTOR_DEFECTO;
+  } catch {
+    return FACTOR_DEFECTO;
+  }
 }
 
-module.exports = { listarEmpresas, getParametros, actualizarParametros };
+module.exports = { obtenerPorcentajePagos, FACTOR_DEFECTO };
