@@ -10,13 +10,22 @@
 -- id_transportista IS NULL y su desglose vive en pro_liquidacion_detalle.
 -- ============================================================================
 
+-- El servidor oficial usa valor_vales/impuesto_pct y no debe recibir las
+-- columnas paralelas del modelo local de desarrollo.
+SET @liq_v2_modelo_oficial := EXISTS (
+  SELECT 1 FROM information_schema.COLUMNS
+   WHERE TABLE_SCHEMA = DATABASE()
+     AND TABLE_NAME = 'pro_liquidacion_detalle'
+     AND COLUMN_NAME = 'valor_vales'
+);
+
 DELIMITER $$
 DROP PROCEDURE IF EXISTS `_liq_v2_add_column`$$
 CREATE PROCEDURE `_liq_v2_add_column`(
   IN p_tabla VARCHAR(64), IN p_columna VARCHAR(64), IN p_definicion TEXT
 )
 BEGIN
-  IF NOT EXISTS (
+  IF COALESCE(@liq_v2_modelo_oficial, 0) = 0 AND NOT EXISTS (
     SELECT 1 FROM information_schema.COLUMNS
      WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = p_tabla AND COLUMN_NAME = p_columna
   ) THEN
@@ -91,10 +100,19 @@ CALL `_liq_v2_add_column`('pro_sobregiro_transportista', 'id_liquidacion_aplica'
   'INT NULL AFTER `id_liquidacion_origen`');
 CALL `_liq_v2_add_column`('pro_detalle_facturas', 'estado',
   'VARCHAR(20) NOT NULL DEFAULT ''ACTIVO'' AFTER `total`');
-ALTER TABLE `pro_sobregiro_transportista`
-  MODIFY COLUMN `estado` VARCHAR(20) NOT NULL DEFAULT 'PENDIENTE';
-ALTER TABLE `pro_detalle_facturas`
-  MODIFY COLUMN `estado` VARCHAR(20) NOT NULL DEFAULT 'ACTIVO';
+SET @ddl = IF(@liq_v2_modelo_oficial = 1,
+  'SELECT ''Modelo oficial: no se modifica pro_sobregiro_transportista.estado'' AS info',
+  'ALTER TABLE `pro_sobregiro_transportista` MODIFY COLUMN `estado` VARCHAR(20) NOT NULL DEFAULT ''PENDIENTE''');
+PREPARE stmt FROM @ddl;
+EXECUTE stmt;
+DEALLOCATE PREPARE stmt;
+
+SET @ddl = IF(@liq_v2_modelo_oficial = 1,
+  'SELECT ''Modelo oficial: no se modifica pro_detalle_facturas.estado'' AS info',
+  'ALTER TABLE `pro_detalle_facturas` MODIFY COLUMN `estado` VARCHAR(20) NOT NULL DEFAULT ''ACTIVO''');
+PREPARE stmt FROM @ddl;
+EXECUTE stmt;
+DEALLOCATE PREPARE stmt;
 
 CREATE TABLE IF NOT EXISTS `pro_abonos_transportista` (
   `correlativo`       INT NOT NULL AUTO_INCREMENT,
@@ -113,7 +131,8 @@ CREATE TABLE IF NOT EXISTS `pro_abonos_transportista` (
 
 DROP PROCEDURE IF EXISTS `_liq_v2_add_column`;
 
--- Firmas esperadas por el backend (no se modifican aquí):
---   CALL sp_generar_liquidacion(id_poliza, id_liq_origen);
---   CALL sp_revertir_liquidacion(id_liquidacion, usuario, motivo);
+-- El backend detecta ambas variantes. Firmas oficiales de producción:
+--   CALL sp_generar_liquidacion(id_poliza, aplica_sobregiro, usuario,
+--        id_liq_origen, OUT num_liquidacion, OUT id_liquidacion, OUT mensaje);
+--   CALL sp_revertir_liquidacion(id_liquidacion, motivo, usuario);
 --   CALL sp_registrar_abono(id_transportista, monto, fecha, forma_pago);

@@ -23,7 +23,7 @@ module.exports = {
   generar: (req, res, next) => responder(
     res,
     next,
-    () => service.generar(req.body.id_poliza, req.body.id_liq_origen),
+    () => service.generar(req.body.id_poliza, req.body.id_liq_origen, userOf(req)),
     'Liquidación generada correctamente',
     201
   ),
