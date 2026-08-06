@@ -314,8 +314,19 @@ async function actualizar(id, data, usuario) {
  * póliza (para el modal "Retarifar"). Agrupa por tarifa con # de envíos, peso y
  * valor acumulado. Solo envíos NO anulados.
  */
-async function tarifasDePoliza(idPoliza) {
+function validarRangoFechas(fechaInicio, fechaFin) {
+  const iso = /^\d{4}-\d{2}-\d{2}$/;
+  if (!iso.test(String(fechaInicio || '')) || !iso.test(String(fechaFin || ''))) {
+    throw errorNegocio('La fecha de inicio y la fecha final son obligatorias.', 400);
+  }
+  if (fechaInicio > fechaFin) {
+    throw errorNegocio('La fecha de inicio no puede ser posterior a la fecha final.', 400);
+  }
+}
+
+async function tarifasDePoliza(idPoliza, fechaInicio, fechaFin) {
   const id = requerirNumero(idPoliza, 'id_poliza');
+  validarRangoFechas(fechaInicio, fechaFin);
   return query(
     `SELECT d.id_tarifa_embarque,
             t.origen, t.destino, t.valor AS valor_tarifa,
@@ -325,9 +336,10 @@ async function tarifasDePoliza(idPoliza) {
        FROM pro_poliza_detalle d
        LEFT JOIN cat_tarifa_embarque t ON t.codigo = d.id_tarifa_embarque
       WHERE d.id_poliza = ? AND d.estado <> ? AND d.id_tarifa_embarque IS NOT NULL
+        AND d.fecha BETWEEN ? AND ?
       GROUP BY d.id_tarifa_embarque, t.origen, t.destino, t.valor
       ORDER BY num_envios DESC`,
-    [id, ESTADO_ANULADA]
+    [id, ESTADO_ANULADA, fechaInicio, fechaFin]
   );
 }
 
@@ -337,9 +349,10 @@ async function tarifasDePoliza(idPoliza) {
  *   valor = peso × porcentaje_pagos × nueva_tarifa
  * Guarda el resultado en pro_poliza_detalle.valor. Devuelve cuántos se actualizaron.
  */
-async function retarifarPoliza(idPoliza, idTarifa, nuevaTarifa, usuario) {
+async function retarifarPoliza(idPoliza, idTarifa, nuevaTarifa, fechaInicio, fechaFin, usuario) {
   const id = requerirNumero(idPoliza, 'id_poliza');
   const tar = requerirNumero(idTarifa, 'id_tarifa_embarque');
+  validarRangoFechas(fechaInicio, fechaFin);
   const nueva = Number(nuevaTarifa);
   if (!Number.isFinite(nueva) || nueva < 0) {
     throw errorNegocio('El valor de la nueva tarifa no es válido.', 400);
@@ -350,8 +363,9 @@ async function retarifarPoliza(idPoliza, idTarifa, nuevaTarifa, usuario) {
   return withTransaction(async (conn) => {
     const [envios] = await conn.query(
       `SELECT correlativo, peso FROM \`pro_poliza_detalle\`
-        WHERE id_poliza = ? AND id_tarifa_embarque = ? AND estado <> ?`,
-      [id, tar, ESTADO_ANULADA]
+        WHERE id_poliza = ? AND id_tarifa_embarque = ? AND estado <> ?
+          AND fecha BETWEEN ? AND ?`,
+      [id, tar, ESTADO_ANULADA, fechaInicio, fechaFin]
     );
     if (!envios.length) {
       throw errorNegocio('No hay envíos con esa tarifa en la póliza para actualizar.', 404);
@@ -372,6 +386,8 @@ async function retarifarPoliza(idPoliza, idTarifa, nuevaTarifa, usuario) {
       actualizados,
       total_valor: Number(totalValor.toFixed(2)),
       nueva_tarifa: nueva,
+      fecha_inicio: fechaInicio,
+      fecha_fin: fechaFin,
       factor,
     };
   });

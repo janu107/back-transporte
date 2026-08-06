@@ -56,7 +56,9 @@ module.exports = {
   /** GET /viajes/poliza/:idPoliza/tarifas — tarifas usadas por los envíos de la póliza. */
   async tarifasPoliza(req, res, next) {
     try {
-      success(res, await service.tarifasDePoliza(req.params.idPoliza));
+      success(res, await service.tarifasDePoliza(
+        req.params.idPoliza, req.query.fecha_inicio, req.query.fecha_fin
+      ));
     } catch (e) { next(e); }
   },
 
@@ -64,7 +66,12 @@ module.exports = {
   async retarifar(req, res, next) {
     try {
       const r = await service.retarifarPoliza(
-        req.params.idPoliza, req.body.id_tarifa_embarque, req.body.nueva_tarifa, userOf(req)
+        req.params.idPoliza,
+        req.body.id_tarifa_embarque,
+        req.body.nueva_tarifa,
+        req.body.fecha_inicio,
+        req.body.fecha_fin,
+        userOf(req)
       );
       success(res, r, `Se actualizaron ${r.actualizados} envío(s).`);
     } catch (e) { next(e); }
