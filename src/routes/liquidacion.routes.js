@@ -23,6 +23,9 @@ router.get('/v2/sobregiros', authMiddleware, ctrlV2.sobregiros);
 router.get('/v2/sobregiros/:id_transportista/abonos', authMiddleware, ctrlV2.abonos);
 router.post('/v2/abonos', authMiddleware, ctrlV2.registrarAbono);
 router.get('/v2/reporte-liquidaciones', authMiddleware, ctrlV2.reporte);
+// Reportes que se consultan desde el Historial de liquidaciones.
+router.get('/v2/reporte-detallado/:id_liquidacion', authMiddleware, ctrlV2.reporteDetallado);
+router.get('/v2/resumen-transportista', authMiddleware, ctrlV2.resumenTransportista);
 
 router.get('/resumen/:id_poliza', authMiddleware, ctrl.resumen);
 router.get('/historial', authMiddleware, ctrl.historial);

@@ -58,4 +58,10 @@ module.exports = {
   reporte: (req, res, next) => responder(
     res, next, () => service.reporte(req.query)
   ),
+  reporteDetallado: (req, res, next) => responder(
+    res, next, () => service.reporteDetallado(req.params.id_liquidacion)
+  ),
+  resumenTransportista: (req, res, next) => responder(
+    res, next, () => service.resumenPorTransportista(req.query)
+  ),
 };

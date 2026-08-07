@@ -41,6 +41,24 @@ function validarRango(fechaInicio, fechaFin) {
   }
 }
 
+/**
+ * Filtro que aísla los ENCABEZADOS de liquidación v2.
+ *
+ * En el modelo local, pro_liquidaciones guarda tanto las filas históricas del
+ * modelo anterior (una por transportista, con id_transportista) como los
+ * encabezados v2 (id_transportista NULL), así que hay que distinguirlos.
+ * En el modelo oficial de producción esa columna NO existe: la tabla es solo
+ * de encabezados y el desglose vive en pro_liquidacion_detalle. Referenciarla
+ * ahí provocaba "Unknown column 'l.id_transportista' in 'where clause'".
+ *
+ * @param {boolean} oficial resultado de usaModeloOficial()
+ * @param {string} alias alias de pro_liquidaciones en la consulta
+ * @returns {string} condición SQL lista para concatenar (vacía en el modelo oficial)
+ */
+function filtroEncabezado(oficial, alias = 'l') {
+  return oficial ? '' : `AND ${alias}.id_transportista IS NULL`;
+}
+
 async function polizasDisponibles() {
   const oficial = await usaModeloOficial();
   const estadosPoliza = oficial ? "('ABIERTA')" : "('CERRADA', 'CERRADA SIN LIQUIDAR')";
@@ -49,7 +67,7 @@ async function polizasDisponibles() {
     `SELECT p.codigo, p.nombre_poliza, p.fecha, p.estado,
             (SELECT lr.correlativo
                FROM pro_liquidaciones lr
-              WHERE lr.id_poliza = p.codigo AND lr.id_transportista IS NULL
+              WHERE lr.id_poliza = p.codigo ${filtroEncabezado(oficial, 'lr')}
                 AND COALESCE(lr.revertida, 0) = 1
               ORDER BY lr.correlativo DESC LIMIT 1) AS id_liq_origen
        FROM man_poliza p
@@ -58,7 +76,7 @@ async function polizasDisponibles() {
           SELECT 1
             FROM pro_liquidaciones l
            WHERE l.id_poliza = p.codigo
-             AND l.id_transportista IS NULL
+             ${filtroEncabezado(oficial, 'l')}
              AND COALESCE(l.revertida, 0) = 0
              AND UPPER(l.estado) IN ${estadosActivos}
         )
@@ -81,9 +99,9 @@ async function validarPolizaParaGenerar(idPoliza) {
   }
   const activa = await queryOne(
     `SELECT correlativo
-       FROM pro_liquidaciones
-      WHERE id_poliza = ? AND id_transportista IS NULL AND COALESCE(revertida, 0) = 0
-        AND UPPER(estado) IN (${oficial ? "'PENDIENTE', 'PAGADA'" : "'LIQUIDADO'"})
+       FROM pro_liquidaciones l
+      WHERE l.id_poliza = ? ${filtroEncabezado(oficial, 'l')} AND COALESCE(l.revertida, 0) = 0
+        AND UPPER(l.estado) IN (${oficial ? "'PENDIENTE', 'PAGADA'" : "'LIQUIDADO'"})
       LIMIT 1`,
     [idPoliza]
   );
@@ -279,7 +297,7 @@ async function detalleLiquidacion(idLiquidacion) {
        JOIN man_poliza p ON p.codigo = l.id_poliza
        LEFT JOIN pro_liquidaciones origen ON origen.correlativo = l.id_liq_origen
        LEFT JOIN pro_liquidaciones reemplazo ON reemplazo.id_liq_origen = l.correlativo
-      WHERE l.correlativo = ? AND l.id_transportista IS NULL`,
+      WHERE l.correlativo = ? ${filtroEncabezado(oficial, 'l')}`,
     [id]
   );
   if (!liquidacion) throw errorNegocio('Liquidación no encontrada.', 404);
@@ -340,18 +358,19 @@ async function generar(idPoliza, idLiqOrigen = null, usuario = 'sistema') {
   }
   const creada = await queryOne(
     `SELECT correlativo
-       FROM pro_liquidaciones
-      WHERE id_poliza = ? AND id_transportista IS NULL AND COALESCE(revertida, 0) = 0
-      ORDER BY correlativo DESC LIMIT 1`,
+       FROM pro_liquidaciones l
+      WHERE l.id_poliza = ? ${filtroEncabezado(oficial, 'l')} AND COALESCE(l.revertida, 0) = 0
+      ORDER BY l.correlativo DESC LIMIT 1`,
     [id]
   );
   if (!creada) throw errorNegocio('El procedimiento no devolvió una liquidación activa.', 500);
   return detalleLiquidacion(creada.correlativo);
 }
 
-function filtrosHistorial(filtros = {}) {
+function filtrosHistorial(filtros = {}, oficial = false) {
   validarRango(filtros.fecha_inicio, filtros.fecha_fin);
-  const condiciones = ['l.id_transportista IS NULL'];
+  // En el modelo oficial no existe l.id_transportista; toda fila ya es encabezado.
+  const condiciones = oficial ? ['1 = 1'] : ['l.id_transportista IS NULL'];
   const params = [];
   if (filtros.id_poliza) { condiciones.push('l.id_poliza = ?'); params.push(idValido(filtros.id_poliza, 'id_poliza')); }
   if (filtros.id_transportista) {
@@ -371,7 +390,7 @@ function filtrosHistorial(filtros = {}) {
 
 async function historial(filtros = {}) {
   const oficial = await usaModeloOficial();
-  const { condiciones, params } = filtrosHistorial(filtros);
+  const { condiciones, params } = filtrosHistorial(filtros, oficial);
   return query(
     `SELECT l.correlativo AS id_liquidacion, l.num_liquidacion, l.id_poliza,
             p.nombre_poliza, l.fecha_liquidacion, l.estado, l.revertida,
@@ -419,7 +438,7 @@ async function reversibles(busqueda = '') {
        FROM pro_liquidaciones l
        JOIN man_poliza p ON p.codigo = l.id_poliza
        LEFT JOIN pro_liquidacion_detalle d ON d.id_liquidacion = l.correlativo
-      WHERE l.id_transportista IS NULL AND COALESCE(l.revertida, 0) = 0
+      WHERE COALESCE(l.revertida, 0) = 0 ${filtroEncabezado(oficial, 'l')}
         AND UPPER(l.estado) IN (${oficial ? "'PENDIENTE', 'PAGADA'" : "'LIQUIDADO'"}) ${filtro}
       GROUP BY l.correlativo, l.num_liquidacion, l.id_poliza, p.nombre_poliza,
                l.fecha_liquidacion, l.usuario_graba
@@ -532,6 +551,197 @@ async function reporte(filtros = {}) {
   };
 }
 
+/**
+ * reporteDetallado — documento "Liquidación a Transportistas" del módulo v2.
+ * Por cada transportista de la liquidación arma el detalle de sus viajes
+ * (cartas de porte / viajes locales), sus anticipos y sus vales de diesel,
+ * más el bloque de totales guardado en pro_liquidacion_detalle (valores
+ * originales; no se recalculan para no alterar históricos).
+ */
+async function reporteDetallado(idLiquidacion) {
+  const id = idValido(idLiquidacion, 'id_liquidacion');
+  const oficial = await usaModeloOficial();
+  const { liquidacion, transportistas } = await detalleLiquidacion(id);
+
+  // En el modelo oficial el transportista del viaje se resuelve por el camión.
+  const transpViaje = oficial
+    ? 'c.id_transportista'
+    : 'COALESCE(d.id_transportista, c.id_transportista)';
+
+  const [viajes, anticipos, vales] = await Promise.all([
+    query(
+      `SELECT ${transpViaje} AS id_transportista,
+              d.num_envio, d.fecha, d.tipo, d.peso, d.valor,
+              cam.placa,
+              TRIM(CONCAT(p.nombres, ' ', COALESCE(p.apellidos, ''))) AS piloto,
+              te.origen AS embarque, te.destino
+         FROM pro_poliza_detalle d
+         LEFT JOIN man_camion c ON c.codigo = d.id_camion
+         LEFT JOIN man_camion cam ON cam.codigo = d.id_camion
+         LEFT JOIN man_pilotos p ON p.codigo = d.id_piloto
+         LEFT JOIN cat_tarifa_embarque te ON te.codigo = d.id_tarifa_embarque
+        WHERE d.id_poliza = ? AND UPPER(d.estado) NOT IN ('ANULADO', 'ANULADA')
+        ORDER BY d.fecha, d.correlativo`,
+      [liquidacion.id_poliza]
+    ),
+    query(
+      `SELECT a.id_transportista, a.num_anticipo, a.fecha, a.descripcion, a.valor
+         FROM pro_anticipo_provision a
+        WHERE a.id_poliza = ? AND UPPER(a.estado) NOT IN ('ANULADO', 'ANULADA')
+        ORDER BY a.fecha, a.correlativo`,
+      [liquidacion.id_poliza]
+    ),
+    query(
+      `SELECT ${oficial ? 'c.id_transportista' : 'COALESCE(d.id_transportista, c.id_transportista)'} AS id_transportista,
+              d.num_vale, d.fecha, d.cantidad AS galones, f.precio,
+              COALESCE(d.total, d.cantidad * f.precio, 0) AS total
+         FROM pro_detalle_facturas d
+         LEFT JOIN man_camion c ON c.codigo = d.id_camion
+         LEFT JOIN man_facturas_vales f ON f.codigo = d.id_factura_vale
+        WHERE d.id_poliza = ? AND UPPER(COALESCE(d.estado, 'ACTIVO')) NOT IN ('ANULADO', 'ANULADA')
+        ORDER BY d.fecha, d.correlativo`,
+      [liquidacion.id_poliza]
+    ),
+  ]);
+
+  const agrupar = (rows) => {
+    const mapa = new Map();
+    rows.forEach((row) => {
+      const key = Number(row.id_transportista);
+      if (!key) return;
+      if (!mapa.has(key)) mapa.set(key, []);
+      mapa.get(key).push(row);
+    });
+    return mapa;
+  };
+  const mViajes = agrupar(viajes);
+  const mAnticipos = agrupar(anticipos);
+  const mVales = agrupar(vales);
+
+  return {
+    liquidacion,
+    transportistas: transportistas.map((t) => {
+      const key = Number(t.id_transportista);
+      return {
+        id_transportista: key,
+        nit: t.nit || '',
+        nombre: t.nombre_comercial || '',
+        viajes: (mViajes.get(key) || []).map((v) => ({
+          c_porte: v.num_envio,
+          fecha: v.fecha,
+          tipo: v.tipo || '',
+          piloto: (v.piloto || '').trim(),
+          placa: v.placa || '',
+          peso: money(v.peso),
+          total_pago: money(v.valor),
+          embarque: v.embarque || '',
+          destino: v.destino || '',
+        })),
+        anticipos: (mAnticipos.get(key) || []).map((a) => ({
+          num: a.num_anticipo, fecha: a.fecha,
+          descripcion: a.descripcion || '', valor: money(a.valor),
+        })),
+        diesel: (mVales.get(key) || []).map((c) => ({
+          num_vale: c.num_vale, fecha: c.fecha,
+          galones: money(c.galones), precio: money(c.precio), total: money(c.total),
+        })),
+        totales: {
+          cantidad_viajes: Number(t.cantidad_viajes || 0),
+          valor_viajes: money(t.valor_viajes),
+          valor_diesel: money(t.valor_diesel),
+          total_galones: money(t.total_galones),
+          valor_anticipos: money(t.valor_anticipos),
+          base_gravable: money(t.base_gravable),
+          porcentaje_impuesto: Number(t.porcentaje_impuesto || 0),
+          valor_impuesto: money(t.valor_impuesto),
+          total_facturar: money(t.total_facturar),
+          suministro: money(t.suministro),
+          sobregiro_anterior: money(t.sobregiro_anterior),
+          total_pagar: money(t.valor_liquidacion),
+        },
+      };
+    }),
+  };
+}
+
+/**
+ * resumenPorTransportista — reporte de RESUMEN por liquidación de transportista.
+ * INGRESOS:   cantidad de viajes, total de peso, valor en carta de porte / viajes locales.
+ * DESCUENTOS: valor de anticipos, valor de diesel, cantidad de galones, total a facturar.
+ * Acepta los mismos filtros que el historial (transportista, póliza, fechas, estado).
+ */
+async function resumenPorTransportista(filtros = {}) {
+  const items = await historial(filtros);
+  const activos = items.filter((row) => !Number(row.revertida));
+  if (!activos.length) return { items: [], totales: null };
+
+  const oficial = await usaModeloOficial();
+  const transpViaje = oficial
+    ? 'c.id_transportista'
+    : 'COALESCE(d.id_transportista, c.id_transportista)';
+
+  // Peso y valor por tipo de viaje: no viven en pro_liquidacion_detalle, se
+  // agregan desde los envíos de cada póliza liquidada.
+  const polizas = [...new Set(activos.map((row) => Number(row.id_poliza)))];
+  const pesos = await query(
+    `SELECT d.id_poliza, ${transpViaje} AS id_transportista,
+            COALESCE(SUM(d.peso), 0) AS total_peso,
+            COALESCE(SUM(CASE WHEN UPPER(COALESCE(d.tipo, '')) LIKE '%LOCAL%'
+                              THEN d.valor ELSE 0 END), 0) AS valor_locales,
+            COALESCE(SUM(CASE WHEN UPPER(COALESCE(d.tipo, '')) LIKE '%LOCAL%'
+                              THEN 0 ELSE d.valor END), 0) AS valor_carta_porte
+       FROM pro_poliza_detalle d
+       LEFT JOIN man_camion c ON c.codigo = d.id_camion
+      WHERE d.id_poliza IN (${polizas.map(() => '?').join(',')})
+        AND UPPER(d.estado) NOT IN ('ANULADO', 'ANULADA')
+      GROUP BY d.id_poliza, ${transpViaje}`,
+    polizas
+  );
+  const clave = (poliza, transportista) => `${Number(poliza)}|${Number(transportista)}`;
+  const mapaPesos = new Map(pesos.map((row) => [clave(row.id_poliza, row.id_transportista), row]));
+
+  const filas = activos.map((row) => {
+    const extra = mapaPesos.get(clave(row.id_poliza, row.id_transportista)) || {};
+    return {
+      num_liquidacion: row.num_liquidacion,
+      fecha_liquidacion: row.fecha_liquidacion,
+      nombre_poliza: row.nombre_poliza,
+      id_transportista: Number(row.id_transportista),
+      nit: row.nit || '',
+      nombre_comercial: row.nombre_comercial || '',
+      // Ingresos
+      cantidad_viajes: Number(row.cantidad_viajes || 0),
+      total_peso: money(extra.total_peso),
+      valor_carta_porte: money(extra.valor_carta_porte),
+      valor_locales: money(extra.valor_locales),
+      valor_viajes: money(row.valor_viajes),
+      // Descuentos
+      valor_anticipos: money(row.valor_anticipos),
+      valor_diesel: money(row.valor_diesel),
+      total_galones: money(row.total_galones),
+      total_facturar: money(row.total_facturar),
+      valor_liquidacion: money(row.valor_liquidacion),
+    };
+  });
+
+  const suma = (campo) => money(filas.reduce((acc, row) => acc + Number(row[campo] || 0), 0));
+  return {
+    items: filas,
+    totales: {
+      cantidad_viajes: filas.reduce((acc, row) => acc + row.cantidad_viajes, 0),
+      total_peso: suma('total_peso'),
+      valor_carta_porte: suma('valor_carta_porte'),
+      valor_locales: suma('valor_locales'),
+      valor_viajes: suma('valor_viajes'),
+      valor_anticipos: suma('valor_anticipos'),
+      valor_diesel: suma('valor_diesel'),
+      total_galones: suma('total_galones'),
+      total_facturar: suma('total_facturar'),
+      valor_liquidacion: suma('valor_liquidacion'),
+    },
+  };
+}
+
 module.exports = {
   polizasDisponibles,
   vistaPrevia,
@@ -544,4 +754,6 @@ module.exports = {
   abonos,
   registrarAbono,
   reporte,
+  reporteDetallado,
+  resumenPorTransportista,
 };
