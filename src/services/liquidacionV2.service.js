@@ -45,9 +45,36 @@ function existeColumna(tabla, columna) {
   return columnaCache.get(clave);
 }
 
+/** ¿Existe la tabla? (mismo criterio de cache que existeColumna). */
+const tablaCache = new Map();
+function existeTabla(tabla) {
+  if (!tablaCache.has(tabla)) {
+    tablaCache.set(tabla, queryOne(
+      `SELECT COUNT(*) AS total FROM information_schema.TABLES
+        WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?`, [tabla]
+    ).then((row) => Number(row?.total || 0) > 0).catch(() => false));
+  }
+  return tablaCache.get(tabla);
+}
+
 /** Modelo oficial de liquidaciones: el desglose usa valor_vales / impuesto_pct. */
 function usaModeloOficial() {
   return existeColumna('pro_liquidacion_detalle', 'valor_vales');
+}
+
+/**
+ * Descuentos manuales de una póliza (aceite / administrativos). Devuelve un
+ * arreglo vacío si la tabla no existe en el esquema.
+ */
+async function descuentosDe(tabla, idPoliza) {
+  if (!(await existeTabla(tabla))) return [];
+  return query(
+    `SELECT d.id_transportista, d.fecha, d.descripcion, d.valor
+       FROM ${tabla} d
+      WHERE d.id_poliza = ? AND UPPER(COALESCE(d.estado, 'ACTIVO')) NOT IN ('ANULADO', 'ANULADA')
+      ORDER BY d.id_transportista, d.fecha, d.correlativo`,
+    [idPoliza]
+  ).catch(() => []);
 }
 
 /**
@@ -585,11 +612,18 @@ async function reporteDetallado(idLiquidacion) {
   // El transportista se resuelve según el esquema real (columna propia o camión).
   const transpViaje = await sqlTransportistaDe('pro_poliza_detalle', 'd', 'c');
   const transpVale = await sqlTransportistaDe('pro_detalle_facturas', 'd', 'c');
+  // "Unidad" del documento = piezas/bultos del envío (puede no existir en el esquema).
+  const colUnidad = (await existeColumna('pro_poliza_detalle', 'cantidad_bultos_piezas'))
+    ? 'd.cantidad_bultos_piezas' : '0';
+  // Placa y piloto del anticipo: solo si la tabla guarda esas referencias.
+  const antCamion = await existeColumna('pro_anticipo_provision', 'id_camion');
+  const antPiloto = await existeColumna('pro_anticipo_provision', 'id_piloto');
 
-  const [viajes, anticipos, vales] = await Promise.all([
+  const [viajes, anticipos, vales, aceite, administrativos] = await Promise.all([
     query(
       `SELECT ${transpViaje} AS id_transportista,
               d.num_envio, d.fecha, d.tipo, d.peso, d.valor,
+              ${colUnidad} AS unidad,
               cam.placa,
               TRIM(CONCAT(p.nombres, ' ', COALESCE(p.apellidos, ''))) AS piloto,
               te.origen AS embarque, te.destino
@@ -603,8 +637,12 @@ async function reporteDetallado(idLiquidacion) {
       [liquidacion.id_poliza]
     ),
     query(
-      `SELECT a.id_transportista, a.num_anticipo, a.fecha, a.descripcion, a.valor
+      `SELECT a.id_transportista, a.num_anticipo, a.fecha, a.descripcion, a.valor,
+              ${antCamion ? 'cam.placa' : "''"} AS placa,
+              ${antPiloto ? "TRIM(CONCAT(p.nombres, ' ', COALESCE(p.apellidos, '')))" : "''"} AS piloto
          FROM pro_anticipo_provision a
+         ${antCamion ? 'LEFT JOIN man_camion cam ON cam.codigo = a.id_camion' : ''}
+         ${antPiloto ? 'LEFT JOIN man_pilotos p ON p.codigo = a.id_piloto' : ''}
         WHERE a.id_poliza = ? AND UPPER(a.estado) NOT IN ('ANULADO', 'ANULADA')
         ORDER BY a.fecha, a.correlativo`,
       [liquidacion.id_poliza]
@@ -620,6 +658,8 @@ async function reporteDetallado(idLiquidacion) {
         ORDER BY d.fecha, d.correlativo`,
       [liquidacion.id_poliza]
     ),
+    descuentosDe('pro_descuento_aceite', liquidacion.id_poliza),
+    descuentosDe('pro_descuento_administrativo', liquidacion.id_poliza),
   ]);
 
   const agrupar = (rows) => {
@@ -635,44 +675,71 @@ async function reporteDetallado(idLiquidacion) {
   const mViajes = agrupar(viajes);
   const mAnticipos = agrupar(anticipos);
   const mVales = agrupar(vales);
+  const mAceite = agrupar(aceite);
+  const mAdmin = agrupar(administrativos);
+  const sumar = (filas, campo) => money(filas.reduce((s, f) => s + Number(f[campo] || 0), 0));
 
   return {
     liquidacion,
     transportistas: transportistas.map((t) => {
       const key = Number(t.id_transportista);
+      const susViajes = mViajes.get(key) || [];
+      const susAceite = mAceite.get(key) || [];
+      const susAdmin = mAdmin.get(key) || [];
+      const totalFacturar = money(t.total_facturar);
+      const totalAnticipos = money(t.valor_anticipos);
       return {
         id_transportista: key,
+        codigo: key,
         nit: t.nit || '',
         nombre: t.nombre_comercial || '',
-        viajes: (mViajes.get(key) || []).map((v) => ({
+        viajes: susViajes.map((v) => ({
           c_porte: v.num_envio,
           fecha: v.fecha,
           tipo: v.tipo || '',
           piloto: (v.piloto || '').trim(),
           placa: v.placa || '',
+          unidad: Number(v.unidad || 0),
           peso: money(v.peso),
           total_pago: money(v.valor),
           embarque: v.embarque || '',
           destino: v.destino || '',
         })),
+        // Totales de las columnas de la tabla de viajes (pie de la tabla).
+        totales_viajes: {
+          unidad: susViajes.reduce((s, v) => s + Number(v.unidad || 0), 0),
+          peso: sumar(susViajes, 'peso'),
+          total_pago: sumar(susViajes, 'valor'),
+        },
         anticipos: (mAnticipos.get(key) || []).map((a) => ({
-          num: a.num_anticipo, fecha: a.fecha,
+          num: a.num_anticipo, fecha: a.fecha, placa: a.placa || '',
+          piloto: (a.piloto || '').trim(),
           descripcion: a.descripcion || '', valor: money(a.valor),
         })),
         diesel: (mVales.get(key) || []).map((c) => ({
           num_vale: c.num_vale, fecha: c.fecha,
           galones: money(c.galones), precio: money(c.precio), total: money(c.total),
         })),
+        administrativos: susAdmin.map((d) => ({
+          fecha: d.fecha, descripcion: d.descripcion || '', valor: money(d.valor),
+        })),
+        aceite: susAceite.map((d) => ({
+          fecha: d.fecha, descripcion: d.descripcion || '', valor: money(d.valor),
+        })),
         totales: {
           cantidad_viajes: Number(t.cantidad_viajes || 0),
           valor_viajes: money(t.valor_viajes),
           valor_diesel: money(t.valor_diesel),
           total_galones: money(t.total_galones),
-          valor_anticipos: money(t.valor_anticipos),
+          valor_anticipos: totalAnticipos,
+          valor_aceite: sumar(susAceite, 'valor'),
+          valor_administrativo: sumar(susAdmin, 'valor'),
           base_gravable: money(t.base_gravable),
           porcentaje_impuesto: Number(t.porcentaje_impuesto || 0),
           valor_impuesto: money(t.valor_impuesto),
-          total_facturar: money(t.total_facturar),
+          total_facturar: totalFacturar,
+          // Sub total = total a facturar menos los anticipos (como en el documento).
+          sub_total: money(totalFacturar - totalAnticipos),
           suministro: money(t.suministro),
           sobregiro_anterior: money(t.sobregiro_anterior),
           total_pagar: money(t.valor_liquidacion),
