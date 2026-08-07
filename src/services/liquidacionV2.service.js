@@ -351,15 +351,25 @@ async function detalleLiquidacion(idLiquidacion) {
   };
 }
 
-async function generar(idPoliza, idLiqOrigen = null, usuario = 'sistema') {
+/**
+ * generar
+ * @param {number} idPoliza
+ * @param {number|null} idLiqOrigen liquidación revertida que ésta reemplaza
+ * @param {string} usuario
+ * @param {boolean} aplicaSobregiro  true (por defecto): descuenta el sobregiro
+ *   anterior en esta liquidación. false: NO lo descuenta y el saldo queda
+ *   pendiente para aplicarse en la siguiente póliza del transportista.
+ */
+async function generar(idPoliza, idLiqOrigen = null, usuario = 'sistema', aplicaSobregiro = true) {
   const id = idValido(idPoliza, 'id_poliza');
   await validarPolizaParaGenerar(id);
   const oficial = await usaModeloOficial();
   const origen = idLiqOrigen ? idValido(idLiqOrigen, 'id_liq_origen') : null;
+  const aplica = aplicaSobregiro === false ? 0 : 1;
   if (oficial) {
     await query(
-      'CALL sp_generar_liquidacion(?, 1, ?, ?, @liq_v2_num, @liq_v2_id, @liq_v2_mensaje)',
-      [id, usuario || 'sistema', origen]
+      'CALL sp_generar_liquidacion(?, ?, ?, ?, @liq_v2_num, @liq_v2_id, @liq_v2_mensaje)',
+      [id, aplica, usuario || 'sistema', origen]
     );
   } else {
     await query('CALL sp_generar_liquidacion(?, ?)', [id, origen]);
@@ -384,6 +394,16 @@ function filtrosHistorial(filtros = {}, oficial = false) {
   if (filtros.id_transportista) {
     condiciones.push('d.id_transportista = ?');
     params.push(idValido(filtros.id_transportista, 'id_transportista'));
+  }
+  // Búsqueda por número de liquidación (coincidencia parcial).
+  if (filtros.num_liquidacion) {
+    condiciones.push('l.num_liquidacion LIKE ?');
+    params.push(`%${String(filtros.num_liquidacion).trim()}%`);
+  }
+  // Liquidación puntual por su correlativo.
+  if (filtros.id_liquidacion) {
+    condiciones.push('l.correlativo = ?');
+    params.push(idValido(filtros.id_liquidacion, 'id_liquidacion'));
   }
   if (filtros.fecha_inicio) { condiciones.push('l.fecha_liquidacion >= ?'); params.push(filtros.fecha_inicio); }
   if (filtros.fecha_fin) { condiciones.push('l.fecha_liquidacion <= ?'); params.push(filtros.fecha_fin); }
