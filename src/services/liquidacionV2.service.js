@@ -21,18 +21,63 @@ function idValido(value, field = 'id') {
 
 const money = (value) => Number(Number(value || 0).toFixed(2));
 
-let modeloOficialPromise;
-function usaModeloOficial() {
-  if (!modeloOficialPromise) {
-    modeloOficialPromise = queryOne(
+/**
+ * ¿Existe una columna en el esquema actual? El resultado se memoriza por
+ * tabla.columna (el esquema no cambia mientras el proceso vive).
+ *
+ * Cada diferencia de esquema se consulta por separado a propósito: el servidor
+ * de producción resultó ser un HÍBRIDO (usa el modelo oficial de liquidaciones
+ * pero conserva con_parametros con columnas nombradas), así que atar todas las
+ * variantes a una sola bandera provocaba errores en cascada.
+ */
+const columnaCache = new Map();
+function existeColumna(tabla, columna) {
+  const clave = `${tabla}.${columna}`;
+  if (!columnaCache.has(clave)) {
+    columnaCache.set(clave, queryOne(
       `SELECT COUNT(*) AS total
          FROM information_schema.COLUMNS
         WHERE TABLE_SCHEMA = DATABASE()
-          AND TABLE_NAME = 'pro_liquidacion_detalle'
-          AND COLUMN_NAME = 'valor_vales'`
-    ).then((row) => Number(row?.total || 0) > 0);
+          AND TABLE_NAME = ? AND COLUMN_NAME = ?`,
+      [tabla, columna]
+    ).then((row) => Number(row?.total || 0) > 0).catch(() => false));
   }
-  return modeloOficialPromise;
+  return columnaCache.get(clave);
+}
+
+/** Modelo oficial de liquidaciones: el desglose usa valor_vales / impuesto_pct. */
+function usaModeloOficial() {
+  return existeColumna('pro_liquidacion_detalle', 'valor_vales');
+}
+
+/**
+ * Consulta del valor del galón, adaptada al formato real de con_parametros:
+ * columnas nombradas (valor_galon_combustible) o tabla llave-valor (clave/valor).
+ */
+async function sqlValorGalon() {
+  if (await existeColumna('con_parametros', 'valor_galon_combustible')) {
+    return `SELECT COALESCE(valor_galon_combustible, 0) AS valor_suministro
+              FROM con_parametros ORDER BY codigo LIMIT 1`;
+  }
+  return `SELECT COALESCE(CAST(valor AS DECIMAL(14,4)), 0) AS valor_suministro
+            FROM con_parametros WHERE clave = 'valor_galon_combustible' LIMIT 1`;
+}
+
+/** Saldo pendiente de sobregiros, según las columnas que exponga la tabla. */
+async function sqlSaldoSobregiro() {
+  return (await existeColumna('pro_sobregiro_transportista', 'saldo_pendiente'))
+    ? 'saldo_pendiente'
+    : 'valor_sobregiro - valor_abonado';
+}
+
+/**
+ * Expresión del transportista de un viaje/vale. Si la tabla de detalle tiene su
+ * propia columna se prefiere esa; si no, se resuelve por el camión.
+ */
+async function sqlTransportistaDe(tabla, aliasDetalle, aliasCamion) {
+  return (await existeColumna(tabla, 'id_transportista'))
+    ? `COALESCE(${aliasDetalle}.id_transportista, ${aliasCamion}.id_transportista)`
+    : `${aliasCamion}.id_transportista`;
 }
 
 function validarRango(fechaInicio, fechaFin) {
@@ -114,14 +159,21 @@ async function vistaPrevia(idPoliza) {
   const poliza = await validarPolizaParaGenerar(id);
   const oficial = await usaModeloOficial();
 
-  const consultas = oficial ? [
+  // Expresiones adaptadas al esquema real (ver existeColumna): así funciona
+  // igual en el modelo local, en el oficial y en híbridos como producción.
+  const transpViaje = await sqlTransportistaDe('pro_poliza_detalle', 'd', 'c');
+  const transpVale = await sqlTransportistaDe('pro_detalle_facturas', 'd', 'c');
+  const saldoSobregiro = await sqlSaldoSobregiro();
+  const valorGalonSql = await sqlValorGalon();
+
+  const consultas = [
     query(
-      `SELECT c.id_transportista, COUNT(*) AS cantidad_viajes,
+      `SELECT ${transpViaje} AS id_transportista, COUNT(*) AS cantidad_viajes,
               COALESCE(SUM(d.valor), 0) AS valor_viajes
          FROM pro_poliza_detalle d
-         JOIN man_camion c ON c.codigo = d.id_camion
+         LEFT JOIN man_camion c ON c.codigo = d.id_camion
         WHERE d.id_poliza = ? AND UPPER(d.estado) NOT IN ('ANULADO', 'ANULADA')
-        GROUP BY c.id_transportista`,
+        GROUP BY ${transpViaje}`,
       [id]
     ),
     query(
@@ -133,69 +185,25 @@ async function vistaPrevia(idPoliza) {
       [id]
     ),
     query(
-      `SELECT d.correlativo, d.num_vale, c.id_transportista, d.fecha,
+      `SELECT d.correlativo, d.num_vale, ${transpVale} AS id_transportista, d.fecha,
               d.cantidad AS galones, f.factura, f.precio,
               COALESCE(d.total, d.cantidad * f.precio, 0) AS total
          FROM pro_detalle_facturas d
-         JOIN man_camion c ON c.codigo = d.id_camion
-         LEFT JOIN man_facturas_vales f ON f.codigo = d.id_factura_vale
-        WHERE d.id_poliza = ?
-        ORDER BY c.id_transportista, d.fecha, d.correlativo`,
-      [id]
-    ),
-    query(
-      `SELECT id_transportista, COALESCE(SUM(saldo_pendiente), 0) AS saldo
-         FROM pro_sobregiro_transportista
-        WHERE UPPER(estado) = 'PENDIENTE'
-        GROUP BY id_transportista`
-    ),
-    queryOne(
-      `SELECT COALESCE(CAST(valor AS DECIMAL(14,4)), 0) AS valor_suministro
-         FROM con_parametros
-        WHERE clave = 'valor_galon_combustible'
-        LIMIT 1`
-    ),
-  ] : [
-    query(
-      `SELECT COALESCE(d.id_transportista, c.id_transportista) AS id_transportista,
-              COUNT(*) AS cantidad_viajes, COALESCE(SUM(d.valor), 0) AS valor_viajes
-         FROM pro_poliza_detalle d
          LEFT JOIN man_camion c ON c.codigo = d.id_camion
-        WHERE d.id_poliza = ? AND UPPER(d.estado) <> 'ANULADO'
-        GROUP BY COALESCE(d.id_transportista, c.id_transportista)`,
-      [id]
-    ),
-    query(
-      `SELECT id_transportista, COUNT(*) AS cantidad_anticipos,
-              COALESCE(SUM(valor), 0) AS valor_anticipos
-         FROM pro_anticipo_provision
-        WHERE id_poliza = ? AND UPPER(estado) IN ('ACTIVO', 'PENDIENTE')
-        GROUP BY id_transportista`,
-      [id]
-    ),
-    query(
-      `SELECT d.correlativo, d.num_vale, d.id_transportista, d.fecha, d.cantidad AS galones,
-              f.factura, f.precio,
-              COALESCE(d.total, d.cantidad * f.precio, 0) AS total
-         FROM pro_detalle_facturas d
          LEFT JOIN man_facturas_vales f ON f.codigo = d.id_factura_vale
-        WHERE d.id_poliza = ? AND UPPER(d.estado) IN ('ACTIVO', 'PENDIENTE')
-        ORDER BY d.id_transportista, d.fecha, d.correlativo`,
+        WHERE d.id_poliza = ? AND UPPER(COALESCE(d.estado, 'ACTIVO')) NOT IN ('ANULADO', 'ANULADA')
+        ORDER BY id_transportista, d.fecha, d.correlativo`,
       [id]
     ),
     query(
-      `SELECT id_transportista,
-              COALESCE(SUM(valor_sobregiro - valor_abonado), 0) AS saldo
+      `SELECT id_transportista, COALESCE(SUM(${saldoSobregiro}), 0) AS saldo
          FROM pro_sobregiro_transportista
         WHERE UPPER(estado) = 'PENDIENTE'
         GROUP BY id_transportista`
     ),
-    queryOne(
-      `SELECT COALESCE(valor_galon_combustible, 0) AS valor_suministro
-         FROM con_parametros
-        WHERE codigo = 1`
-    ),
+    queryOne(valorGalonSql),
   ];
+
   const [viajes, anticipos, vales, sobregiros, parametro] = await Promise.all(consultas);
 
   const porId = new Map();
@@ -316,14 +324,14 @@ async function detalleLiquidacion(idLiquidacion) {
     ),
     query(
       `SELECT d.correlativo, d.num_vale,
-              ${oficial ? 'c.id_transportista' : 'd.id_transportista'} AS id_transportista,
+              ${await sqlTransportistaDe('pro_detalle_facturas', 'd', 'c')} AS id_transportista,
               d.fecha,
               d.cantidad AS galones, f.factura, f.precio,
               COALESCE(d.total, d.cantidad * f.precio, 0) AS total
          FROM pro_detalle_facturas d
-         ${oficial ? 'JOIN man_camion c ON c.codigo = d.id_camion' : ''}
+         LEFT JOIN man_camion c ON c.codigo = d.id_camion
          LEFT JOIN man_facturas_vales f ON f.codigo = d.id_factura_vale
-        WHERE d.id_poliza = ? ${oficial ? '' : "AND UPPER(d.estado) <> 'ANULADO'"}
+        WHERE d.id_poliza = ? AND UPPER(COALESCE(d.estado, 'ACTIVO')) NOT IN ('ANULADO', 'ANULADA')
         ORDER BY id_transportista, d.fecha, d.correlativo`,
       [liquidacion.id_poliza]
     ),
@@ -460,28 +468,22 @@ async function revertir(idLiquidacion, usuario, motivo) {
 }
 
 async function sobregiros() {
-  const oficial = await usaModeloOficial();
-  if (oficial) {
-    return query(
-      `SELECT t.codigo AS id_transportista, t.nit, t.nombre_comercial,
-              COALESCE(SUM(CASE WHEN UPPER(s.estado) <> 'CANCELADO' THEN s.monto_sobregiro ELSE 0 END), 0) AS sobregiro_total,
-              COALESCE(SUM(CASE WHEN UPPER(s.estado) <> 'CANCELADO' THEN s.monto_aplicado ELSE 0 END), 0) AS total_abonado,
-              COALESCE(SUM(CASE WHEN UPPER(s.estado) <> 'CANCELADO' THEN s.saldo_pendiente ELSE 0 END), 0) AS saldo_pendiente,
-              CASE WHEN COALESCE(SUM(CASE WHEN UPPER(s.estado) <> 'CANCELADO' THEN s.saldo_pendiente ELSE 0 END), 0) <= 0
-                   THEN 'CUBIERTO' ELSE 'PENDIENTE' END AS estado
-         FROM man_transportista t
-         JOIN pro_sobregiro_transportista s ON s.id_transportista = t.codigo
-        GROUP BY t.codigo, t.nit, t.nombre_comercial
-        ORDER BY saldo_pendiente DESC, t.nombre_comercial`
-    );
-  }
+  // Nombres de columna según el esquema real (producción y desarrollo difieren).
+  const usaMonto = await existeColumna('pro_sobregiro_transportista', 'monto_sobregiro');
+  const colTotal = usaMonto ? 's.monto_sobregiro' : 's.valor_sobregiro';
+  const colAbonado = usaMonto ? 's.monto_aplicado' : 's.valor_abonado';
+  const colSaldo = (await existeColumna('pro_sobregiro_transportista', 'saldo_pendiente'))
+    ? 's.saldo_pendiente'
+    : 's.valor_sobregiro - s.valor_abonado';
+  const excluido = usaMonto ? 'CANCELADO' : 'ANULADO';
+  const vivo = (expr) => `COALESCE(SUM(CASE WHEN UPPER(s.estado) <> '${excluido}' THEN ${expr} ELSE 0 END), 0)`;
+
   return query(
     `SELECT t.codigo AS id_transportista, t.nit, t.nombre_comercial,
-            COALESCE(SUM(CASE WHEN UPPER(s.estado) <> 'ANULADO' THEN s.valor_sobregiro ELSE 0 END), 0) AS sobregiro_total,
-            COALESCE(SUM(CASE WHEN UPPER(s.estado) <> 'ANULADO' THEN s.valor_abonado ELSE 0 END), 0) AS total_abonado,
-            COALESCE(SUM(CASE WHEN UPPER(s.estado) <> 'ANULADO' THEN s.valor_sobregiro - s.valor_abonado ELSE 0 END), 0) AS saldo_pendiente,
-            CASE WHEN COALESCE(SUM(CASE WHEN UPPER(s.estado) <> 'ANULADO' THEN s.valor_sobregiro - s.valor_abonado ELSE 0 END), 0) <= 0
-                 THEN 'CUBIERTO' ELSE 'PENDIENTE' END AS estado
+            ${vivo(colTotal)} AS sobregiro_total,
+            ${vivo(colAbonado)} AS total_abonado,
+            ${vivo(colSaldo)} AS saldo_pendiente,
+            CASE WHEN ${vivo(colSaldo)} <= 0 THEN 'CUBIERTO' ELSE 'PENDIENTE' END AS estado
        FROM man_transportista t
        JOIN pro_sobregiro_transportista s ON s.id_transportista = t.codigo
       GROUP BY t.codigo, t.nit, t.nombre_comercial
@@ -491,24 +493,23 @@ async function sobregiros() {
 
 async function abonos(idTransportista) {
   const id = idValido(idTransportista, 'id_transportista');
-  const oficial = await usaModeloOficial();
-  if (oficial) {
-    return query(
-      `SELECT a.correlativo, DATE(a.fecha_hora_graba) AS fecha, a.monto,
-              a.descripcion AS forma_pago, NULL AS referencia,
-              a.usuario_graba, a.fecha_hora_graba
-         FROM pro_abonos_transportista a
-        WHERE a.id_transportista = ? AND UPPER(a.estado) = 'ACTIVO'
-        ORDER BY a.fecha_hora_graba DESC, a.correlativo DESC`,
-      [id]
-    );
-  }
+  // La tabla de abonos tiene dos variantes: fecha/forma_pago/referencia propias,
+  // o descripcion + fecha_hora_graba.
+  const tieneFecha = await existeColumna('pro_abonos_transportista', 'fecha');
+  const tieneEstado = await existeColumna('pro_abonos_transportista', 'estado');
+  const colFecha = tieneFecha ? 'a.fecha' : 'DATE(a.fecha_hora_graba)';
+  const colForma = (await existeColumna('pro_abonos_transportista', 'forma_pago'))
+    ? 'a.forma_pago' : 'a.descripcion';
+  const colRef = (await existeColumna('pro_abonos_transportista', 'referencia'))
+    ? 'a.referencia' : 'NULL';
+
   return query(
-    `SELECT a.correlativo, a.fecha, a.monto, a.forma_pago, a.referencia,
+    `SELECT a.correlativo, ${colFecha} AS fecha, a.monto,
+            ${colForma} AS forma_pago, ${colRef} AS referencia,
             a.usuario_graba, a.fecha_hora_graba
        FROM pro_abonos_transportista a
-      WHERE a.id_transportista = ?
-      ORDER BY a.fecha DESC, a.correlativo DESC`,
+      WHERE a.id_transportista = ?${tieneEstado ? " AND UPPER(a.estado) = 'ACTIVO'" : ''}
+      ORDER BY a.fecha_hora_graba DESC, a.correlativo DESC`,
     [id]
   );
 }
@@ -521,9 +522,8 @@ async function registrarAbono(data, usuario) {
   const formaPago = String(data.forma_pago || '').trim();
   if (!formaPago) throw errorNegocio('La forma de pago es obligatoria.', 400);
 
-  const oficial = await usaModeloOficial();
   const saldo = await queryOne(
-    `SELECT COALESCE(SUM(${oficial ? 'saldo_pendiente' : 'valor_sobregiro - valor_abonado'}), 0) AS saldo
+    `SELECT COALESCE(SUM(${await sqlSaldoSobregiro()}), 0) AS saldo
        FROM pro_sobregiro_transportista
       WHERE id_transportista = ? AND UPPER(estado) = 'PENDIENTE'`,
     [id]
@@ -560,13 +560,11 @@ async function reporte(filtros = {}) {
  */
 async function reporteDetallado(idLiquidacion) {
   const id = idValido(idLiquidacion, 'id_liquidacion');
-  const oficial = await usaModeloOficial();
   const { liquidacion, transportistas } = await detalleLiquidacion(id);
 
-  // En el modelo oficial el transportista del viaje se resuelve por el camión.
-  const transpViaje = oficial
-    ? 'c.id_transportista'
-    : 'COALESCE(d.id_transportista, c.id_transportista)';
+  // El transportista se resuelve según el esquema real (columna propia o camión).
+  const transpViaje = await sqlTransportistaDe('pro_poliza_detalle', 'd', 'c');
+  const transpVale = await sqlTransportistaDe('pro_detalle_facturas', 'd', 'c');
 
   const [viajes, anticipos, vales] = await Promise.all([
     query(
@@ -592,7 +590,7 @@ async function reporteDetallado(idLiquidacion) {
       [liquidacion.id_poliza]
     ),
     query(
-      `SELECT ${oficial ? 'c.id_transportista' : 'COALESCE(d.id_transportista, c.id_transportista)'} AS id_transportista,
+      `SELECT ${transpVale} AS id_transportista,
               d.num_vale, d.fecha, d.cantidad AS galones, f.precio,
               COALESCE(d.total, d.cantidad * f.precio, 0) AS total
          FROM pro_detalle_facturas d
@@ -675,10 +673,7 @@ async function resumenPorTransportista(filtros = {}) {
   const activos = items.filter((row) => !Number(row.revertida));
   if (!activos.length) return { items: [], totales: null };
 
-  const oficial = await usaModeloOficial();
-  const transpViaje = oficial
-    ? 'c.id_transportista'
-    : 'COALESCE(d.id_transportista, c.id_transportista)';
+  const transpViaje = await sqlTransportistaDe('pro_poliza_detalle', 'd', 'c');
 
   // Peso y valor por tipo de viaje: no viven en pro_liquidacion_detalle, se
   // agregan desde los envíos de cada póliza liquidada.
