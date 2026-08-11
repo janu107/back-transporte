@@ -84,6 +84,7 @@ async function resumenPoliza(idPoliza) {
 
   const agg = await queryOne(
     `SELECT COALESCE(SUM(cantidad_bultos_piezas), 0) AS piezas_usadas,
+            COALESCE(SUM(peso), 0) AS peso_usado,
             COUNT(*) AS viajes_realizados
        FROM pro_poliza_detalle
       WHERE id_poliza = ? AND estado <> ?`,
@@ -93,6 +94,9 @@ async function resumenPoliza(idPoliza) {
   const cantidadPiezas = Number(poliza.cantidad_piezas || 0);
   const piezasUsadas = Number(agg.piezas_usadas || 0);
   const viajes = Number(agg.viajes_realizados || 0);
+  // [V9 §5] Saldo de peso para que la pantalla avise antes de guardar.
+  const pesoTotal = Number(poliza.peso_total || poliza.peso_kilogramos || 0);
+  const pesoUsado = Number(agg.peso_usado || 0);
 
   return {
     id_poliza: id,
@@ -104,6 +108,8 @@ async function resumenPoliza(idPoliza) {
     peso_total: Number(poliza.peso_total || 0),
     piezas_usadas: piezasUsadas,
     saldo_piezas: cantidadPiezas - piezasUsadas,
+    peso_usado: Number(pesoUsado.toFixed(2)),
+    saldo_peso: Number((pesoTotal - pesoUsado).toFixed(2)),
     viajes_realizados: viajes,
   };
 }
@@ -118,7 +124,7 @@ async function validarYNormalizar(data, excluirCorrelativo = null) {
 
   // 1) Póliza debe existir y estar ABIERTA.
   const poliza = await queryOne(
-    'SELECT codigo, estado, cantidad_piezas FROM man_poliza WHERE codigo = ?',
+    'SELECT codigo, estado, cantidad_piezas, peso_total, peso_kilogramos FROM man_poliza WHERE codigo = ?',
     [idPoliza]
   );
   if (!poliza) throw errorNegocio('La póliza no existe.', 400);
@@ -167,9 +173,29 @@ async function validarYNormalizar(data, excluirCorrelativo = null) {
     throw errorNegocio(`Las piezas del viaje (${piezas}) exceden el saldo disponible de la póliza (${saldo}).`);
   }
 
-  // 5) Valor = peso(kg) × 0.022046 × valor_tarifa (recalculado en servidor).
+  // 5) [V9 §5] Saldo de PESO: la suma de los envíos no puede exceder el peso
+  // de la póliza. Se valida en servidor para que no dependa de la pantalla.
   const peso = Number(data.peso || 0);
   if (peso < 0) throw errorNegocio('El peso no puede ser negativo.', 400);
+
+  const pesoPoliza = Number(poliza.peso_total || poliza.peso_kilogramos || 0);
+  if (pesoPoliza > 0) {
+    const aggPeso = await queryOne(
+      `SELECT COALESCE(SUM(peso), 0) AS usado
+         FROM pro_poliza_detalle
+        WHERE id_poliza = ? AND estado <> ?${excluir}`,
+      aggParams
+    );
+    const pesoUsado = Number(aggPeso.usado || 0);
+    const saldoPeso = pesoPoliza - pesoUsado;
+    if (peso > saldoPeso) {
+      throw errorNegocio(
+        `El peso del envío (${peso.toFixed(2)} kg) excede el saldo disponible de la póliza `
+        + `(${saldoPeso.toFixed(2)} kg de ${pesoPoliza.toFixed(2)} kg; ya se usaron ${pesoUsado.toFixed(2)} kg).`
+      );
+    }
+  }
+
   const idTarifa = nz(data.id_tarifa_embarque);
   let valorTarifa = 0;
   if (idTarifa != null) {
@@ -260,21 +286,40 @@ async function validarCalcular(data) {
   const piezas = Number(data.cantidad_piezas || 0);
   const peso = Number(data.peso_kg || 0);
 
-  const poliza = await queryOne('SELECT cantidad_piezas FROM man_poliza WHERE codigo = ?', [idPoliza]);
+  const poliza = await queryOne(
+    'SELECT cantidad_piezas, peso_total, peso_kilogramos FROM man_poliza WHERE codigo = ?', [idPoliza]
+  );
   if (!poliza) throw errorNegocio('Poliza no encontrada', 404);
   const total = Number(poliza.cantidad_piezas || 0);
   if (piezas > total) {
     throw errorNegocio(`No puede poner mayor a las piezas de la poliza. Total poliza: ${total} piezas.`);
   }
 
+  // Se excluye el propio viaje cuando la validación viene de una edición.
+  const excluir = data.correlativo ? ' AND correlativo <> ?' : '';
+  const params = [idPoliza, ESTADO_ANULADA];
+  if (data.correlativo) params.push(Number(data.correlativo));
+
   const agg = await queryOne(
-    `SELECT COALESCE(SUM(cantidad_bultos_piezas), 0) AS usadas
-       FROM pro_poliza_detalle WHERE id_poliza = ? AND estado <> ?`,
-    [idPoliza, ESTADO_ANULADA]
+    `SELECT COALESCE(SUM(cantidad_bultos_piezas), 0) AS usadas,
+            COALESCE(SUM(peso), 0) AS peso_usado
+       FROM pro_poliza_detalle WHERE id_poliza = ? AND estado <> ?${excluir}`,
+    params
   );
   const saldo = total - Number(agg.usadas || 0);
   if (piezas > saldo) {
     throw errorNegocio(`Se paso del saldo restante del envio. Saldo disponible: ${saldo} piezas.`);
+  }
+
+  // [V9 §5] El peso acumulado de los envíos no puede exceder el de la póliza.
+  const pesoPoliza = Number(poliza.peso_total || poliza.peso_kilogramos || 0);
+  const pesoUsado = Number(agg.peso_usado || 0);
+  const saldoPeso = Number((pesoPoliza - pesoUsado).toFixed(2));
+  if (pesoPoliza > 0 && peso > saldoPeso) {
+    throw errorNegocio(
+      `El peso del envío (${peso.toFixed(2)} kg) excede el saldo disponible de la póliza `
+      + `(${saldoPeso.toFixed(2)} kg de ${pesoPoliza.toFixed(2)} kg).`
+    );
   }
 
   const tarifa = await queryOne('SELECT valor, estado FROM cat_tarifa_embarque WHERE codigo = ?', [idTarifa]);
@@ -285,8 +330,11 @@ async function validarCalcular(data) {
   const valor = calcularValor(peso, tarifa.valor, factor);
   return {
     saldo_piezas: saldo,
+    saldo_peso: Number((saldoPeso - peso).toFixed(2)),
+    peso_poliza: pesoPoliza,
     valor,
-    mensaje: `OK. Valor calculado: Q${valor.toFixed(2)}. Saldo piezas restante: ${saldo}`,
+    mensaje: `OK. Valor calculado: Q${valor.toFixed(2)}. Saldo piezas: ${saldo}`
+      + (pesoPoliza > 0 ? ` · Saldo peso: ${(saldoPeso - peso).toFixed(2)} kg` : ''),
   };
 }
 
@@ -314,6 +362,25 @@ async function actualizar(id, data, usuario) {
  * póliza (para el modal "Retarifar"). Agrupa por tarifa con # de envíos, peso y
  * valor acumulado. Solo envíos NO anulados.
  */
+/**
+ * Expresión SQL del transportista de un envío. En algunos esquemas
+ * pro_poliza_detalle no tiene id_transportista y hay que resolverlo por el
+ * camión, así que se consulta el esquema real en vez de suponerlo.
+ */
+let transpEnvioPromise;
+function sqlTransportistaEnvio(aliasDetalle = 'd', aliasCamion = 'c') {
+  if (!transpEnvioPromise) {
+    transpEnvioPromise = queryOne(
+      `SELECT COUNT(*) AS total FROM information_schema.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'pro_poliza_detalle'
+          AND COLUMN_NAME = 'id_transportista'`
+    ).then((r) => Number(r?.total || 0) > 0).catch(() => false);
+  }
+  return transpEnvioPromise.then((propia) => (propia
+    ? { expr: `COALESCE(${aliasDetalle}.id_transportista, ${aliasCamion}.id_transportista)`, propia }
+    : { expr: `${aliasCamion}.id_transportista`, propia }));
+}
+
 function validarRangoFechas(fechaInicio, fechaFin) {
   const iso = /^\d{4}-\d{2}-\d{2}$/;
   if (!iso.test(String(fechaInicio || '')) || !iso.test(String(fechaFin || ''))) {
@@ -324,9 +391,17 @@ function validarRangoFechas(fechaInicio, fechaFin) {
   }
 }
 
-async function tarifasDePoliza(idPoliza, fechaInicio, fechaFin) {
+async function tarifasDePoliza(idPoliza, fechaInicio, fechaFin, idTransportista = null) {
   const id = requerirNumero(idPoliza, 'id_poliza');
   validarRangoFechas(fechaInicio, fechaFin);
+  // [V9 §4] Filtro opcional por transportista (vacío = todos).
+  const params = [id, ESTADO_ANULADA, fechaInicio, fechaFin];
+  const { expr } = await sqlTransportistaEnvio('d', 'c');
+  let filtroTransp = '';
+  if (idTransportista) {
+    filtroTransp = ` AND ${expr} = ?`;
+    params.push(requerirNumero(idTransportista, 'id_transportista'));
+  }
   return query(
     `SELECT d.id_tarifa_embarque,
             t.origen, t.destino, t.valor AS valor_tarifa,
@@ -334,12 +409,52 @@ async function tarifasDePoliza(idPoliza, fechaInicio, fechaFin) {
             COALESCE(SUM(d.peso), 0)    AS suma_peso,
             COALESCE(SUM(d.valor), 0)   AS suma_valor
        FROM pro_poliza_detalle d
+       LEFT JOIN man_camion c ON c.codigo = d.id_camion
        LEFT JOIN cat_tarifa_embarque t ON t.codigo = d.id_tarifa_embarque
       WHERE d.id_poliza = ? AND d.estado <> ? AND d.id_tarifa_embarque IS NOT NULL
-        AND d.fecha BETWEEN ? AND ?
+        AND d.fecha BETWEEN ? AND ?${filtroTransp}
       GROUP BY d.id_tarifa_embarque, t.origen, t.destino, t.valor
       ORDER BY num_envios DESC`,
+    params
+  );
+}
+
+/**
+ * transportistasDePoliza — [V9 §4] Transportistas con envíos en la póliza dentro
+ * del rango, para el selector del modal «Retarifar».
+ */
+async function transportistasDePoliza(idPoliza, fechaInicio, fechaFin) {
+  const id = requerirNumero(idPoliza, 'id_poliza');
+  validarRangoFechas(fechaInicio, fechaFin);
+  const { expr } = await sqlTransportistaEnvio('d', 'c');
+  return query(
+    `SELECT ${expr} AS codigo, t.nombre_comercial, t.nit,
+            COUNT(*) AS num_envios
+       FROM pro_poliza_detalle d
+       LEFT JOIN man_camion c ON c.codigo = d.id_camion
+       JOIN man_transportista t ON t.codigo = ${expr}
+      WHERE d.id_poliza = ? AND d.estado <> ? AND d.fecha BETWEEN ? AND ?
+      GROUP BY ${expr}, t.nombre_comercial, t.nit
+      ORDER BY t.nombre_comercial`,
     [id, ESTADO_ANULADA, fechaInicio, fechaFin]
+  );
+}
+
+/**
+ * puntosDePoliza — [V9 §3] Puntos de embarque (tarifas) que REALMENTE tuvo la
+ * póliza. El reporte de arrastre listaba el catálogo completo (cientos de
+ * puntos), lo que hacía imposible encontrar los de la póliza consultada.
+ */
+async function puntosDePoliza(idPoliza) {
+  const id = requerirNumero(idPoliza, 'id_poliza');
+  return query(
+    `SELECT DISTINCT d.id_tarifa_embarque AS codigo,
+            t.descripcion, t.origen, t.destino
+       FROM pro_poliza_detalle d
+       JOIN cat_tarifa_embarque t ON t.codigo = d.id_tarifa_embarque
+      WHERE d.id_poliza = ? AND d.estado <> ?
+      ORDER BY t.descripcion, t.origen`,
+    [id, ESTADO_ANULADA]
   );
 }
 
@@ -349,7 +464,7 @@ async function tarifasDePoliza(idPoliza, fechaInicio, fechaFin) {
  *   valor = peso × porcentaje_pagos × nueva_tarifa
  * Guarda el resultado en pro_poliza_detalle.valor. Devuelve cuántos se actualizaron.
  */
-async function retarifarPoliza(idPoliza, idTarifa, nuevaTarifa, fechaInicio, fechaFin, usuario) {
+async function retarifarPoliza(idPoliza, idTarifa, nuevaTarifa, fechaInicio, fechaFin, usuario, idTransportista = null) {
   const id = requerirNumero(idPoliza, 'id_poliza');
   const tar = requerirNumero(idTarifa, 'id_tarifa_embarque');
   validarRangoFechas(fechaInicio, fechaFin);
@@ -359,13 +474,23 @@ async function retarifarPoliza(idPoliza, idTarifa, nuevaTarifa, fechaInicio, fec
   }
 
   const factor = await obtenerPorcentajePagos();
+  // [V9 §4] Si se indica transportista, solo se retarifan sus envíos.
+  const params = [id, tar, ESTADO_ANULADA, fechaInicio, fechaFin];
+  const { expr } = await sqlTransportistaEnvio('d', 'c');
+  let filtroTransp = '';
+  if (idTransportista) {
+    filtroTransp = ` AND ${expr} = ?`;
+    params.push(requerirNumero(idTransportista, 'id_transportista'));
+  }
 
   return withTransaction(async (conn) => {
     const [envios] = await conn.query(
-      `SELECT correlativo, peso FROM \`pro_poliza_detalle\`
-        WHERE id_poliza = ? AND id_tarifa_embarque = ? AND estado <> ?
-          AND fecha BETWEEN ? AND ?`,
-      [id, tar, ESTADO_ANULADA, fechaInicio, fechaFin]
+      `SELECT d.correlativo, d.peso
+         FROM \`pro_poliza_detalle\` d
+         LEFT JOIN man_camion c ON c.codigo = d.id_camion
+        WHERE d.id_poliza = ? AND d.id_tarifa_embarque = ? AND d.estado <> ?
+          AND d.fecha BETWEEN ? AND ?${filtroTransp}`,
+      params
     );
     if (!envios.length) {
       throw errorNegocio('No hay envíos con esa tarifa en la póliza para actualizar.', 404);
@@ -413,5 +538,7 @@ module.exports = {
   actualizar,
   cambiarEstado,
   tarifasDePoliza,
+  transportistasDePoliza,
+  puntosDePoliza,
   retarifarPoliza,
 };

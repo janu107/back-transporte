@@ -100,6 +100,71 @@ async function crear(data, usuario) {
   });
 }
 
+/**
+ * actualizar — [V9 §8] Edita un vale de combustible manual.
+ *
+ * El saldo de la factura se reajusta dentro de la misma transacción: primero se
+ * devuelve la cantidad anterior y luego se descuenta la nueva, de modo que la
+ * validación de saldo trabaje sobre el disponible real. Funciona también cuando
+ * el vale se mueve a otra factura.
+ */
+async function actualizar(id, data, usuario) {
+  const correlativo = requerirNumero(id, 'correlativo');
+  return withTransaction(async (conn) => {
+    const runner = (sql, params = []) => conn.query(sql, params).then(([rows]) => rows);
+
+    const [rows] = await conn.query('SELECT * FROM pro_detalle_facturas WHERE correlativo = ? FOR UPDATE', [correlativo]);
+    const det = rows[0];
+    if (!det) throw errorNegocio('Vale no encontrado.', 404);
+    if (String(det.origen || '').toUpperCase() !== 'M') {
+      throw errorNegocio('Solo se pueden editar vales manuales; los generados por el API no se modifican.', 400);
+    }
+    if (String(det.estado || '').toUpperCase() === 'ANULADO') {
+      throw errorNegocio('El vale está anulado: reactívelo antes de editarlo.', 400);
+    }
+
+    // Devuelve la cantidad anterior para que el saldo refleje el disponible real.
+    await conn.query(
+      'UPDATE man_facturas_vales SET saldo = saldo + ? WHERE codigo = ?',
+      [det.cantidad, det.id_factura_vale]
+    );
+
+    let validado;
+    try {
+      validado = await validar({
+        id_factura_vale: data.id_factura_vale ?? det.id_factura_vale,
+        id_poliza: data.id_poliza ?? det.id_poliza,
+        id_camion: data.id_camion ?? det.id_camion,
+        id_piloto: data.id_piloto ?? det.id_piloto,
+        fecha: data.fecha ?? det.fecha,
+        cantidad: data.cantidad ?? det.cantidad,
+      }, runner);
+    } catch (e) {
+      // La transacción revierte la devolución del saldo al propagar el error.
+      throw e;
+    }
+    const { row } = validado;
+
+    // Descuenta la nueva cantidad de la factura destino.
+    await conn.query(
+      'UPDATE man_facturas_vales SET saldo = saldo - ? WHERE codigo = ?',
+      [row.cantidad, row.id_factura_vale]
+    );
+
+    await conn.query(
+      `UPDATE pro_detalle_facturas
+          SET id_factura_vale = ?, id_poliza = ?, id_transportista = ?, id_camion = ?,
+              id_piloto = ?, fecha = ?, cantidad = ?, total = ?, usuario_graba = ?
+        WHERE correlativo = ?`,
+      [row.id_factura_vale, row.id_poliza, row.id_transportista, row.id_camion,
+        row.id_piloto, row.fecha, row.cantidad, row.total, usuario || 'sistema', correlativo]
+    );
+
+    const [upd] = await conn.query('SELECT * FROM pro_detalle_facturas WHERE correlativo = ?', [correlativo]);
+    return upd[0];
+  });
+}
+
 /** Anula un vale manual: restaura el saldo de la factura y marca ANULADO. */
 async function cambiarEstado(id, estado, usuario) {
   const correlativo = requerirNumero(id, 'correlativo');
@@ -243,4 +308,4 @@ async function buscarReimpresion({ vale, placa } = {}) {
   return rows.map(mapValeComb);
 }
 
-module.exports = { listar, crear, cambiarEstado, impresion, impresionPorApi, buscarReimpresion };
+module.exports = { listar, crear, actualizar, cambiarEstado, impresion, impresionPorApi, buscarReimpresion };

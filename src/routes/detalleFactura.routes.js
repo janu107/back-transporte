@@ -16,6 +16,7 @@ router.get('/reimpresion', authMiddleware, ctrl.buscarReimpresion); // antes de 
 router.get('/por-api/:apiId', authMiddleware, ctrl.impresionPorApi);
 router.get('/:id/impresion', authMiddleware, ctrl.impresion);
 router.post('/', authMiddleware, ctrl.create);
+router.put('/:id', authMiddleware, ctrl.update); // [V9 §8] editar vale manual
 router.patch('/:id/estado', authMiddleware, ctrl.changeEstado);
 
 module.exports = router;

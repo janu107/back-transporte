@@ -538,6 +538,43 @@ async function sobregiros() {
   );
 }
 
+/**
+ * sobregirosDetalle — [V9 §7] Sobregiros abiertos POR LIQUIDACIÓN y
+ * transportista: de qué liquidación/póliza salió cada saldo negativo.
+ * Es solo consulta; el registro de abonos se retiró de la pantalla.
+ */
+async function sobregirosDetalle() {
+  const usaMonto = await existeColumna('pro_sobregiro_transportista', 'monto_sobregiro');
+  const colTotal = usaMonto ? 's.monto_sobregiro' : 's.valor_sobregiro';
+  const colAbonado = usaMonto ? 's.monto_aplicado' : 's.valor_abonado';
+  const colSaldo = (await existeColumna('pro_sobregiro_transportista', 'saldo_pendiente'))
+    ? 's.saldo_pendiente'
+    : '(s.valor_sobregiro - s.valor_abonado)';
+
+  // La liquidación de origen puede referenciarse por id o resolverse por la póliza.
+  const tieneLiqOrigen = await existeColumna('pro_sobregiro_transportista', 'id_liquidacion_origen');
+  const oficial = await usaModeloOficial();
+  const joinLiq = tieneLiqOrigen
+    ? 'LEFT JOIN pro_liquidaciones l ON l.correlativo = s.id_liquidacion_origen'
+    : `LEFT JOIN pro_liquidaciones l ON l.id_poliza = s.id_poliza_origen ${filtroEncabezado(oficial, 'l')}`;
+
+  return query(
+    `SELECT s.correlativo,
+            t.codigo AS id_transportista, t.nit, t.nombre_comercial,
+            s.id_poliza_origen, p.nombre_poliza,
+            l.num_liquidacion, l.fecha_liquidacion,
+            ${colTotal}   AS sobregiro_total,
+            ${colAbonado} AS total_abonado,
+            ${colSaldo}   AS saldo_pendiente,
+            s.estado
+       FROM pro_sobregiro_transportista s
+       JOIN man_transportista t ON t.codigo = s.id_transportista
+       LEFT JOIN man_poliza p ON p.codigo = s.id_poliza_origen
+       ${joinLiq}
+      ORDER BY t.nombre_comercial, l.fecha_liquidacion DESC, s.correlativo DESC`
+  );
+}
+
 async function abonos(idTransportista) {
   const id = idValido(idTransportista, 'id_transportista');
   // La tabla de abonos tiene dos variantes: fecha/forma_pago/referencia propias,
@@ -833,6 +870,7 @@ module.exports = {
   reversibles,
   revertir,
   sobregiros,
+  sobregirosDetalle,
   abonos,
   registrarAbono,
   reporte,

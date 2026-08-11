@@ -16,6 +16,13 @@ module.exports = {
       success(res, row, 'Vale registrado correctamente', 201);
     } catch (e) { next(e); }
   },
+  /** PUT /detalle-factura/:id — [V9 §8] edita un vale manual (reajusta el saldo). */
+  async update(req, res, next) {
+    try {
+      const row = await service.actualizar(req.params.id, req.body, userOf(req));
+      success(res, row, 'Vale actualizado correctamente');
+    } catch (e) { next(e); }
+  },
   async changeEstado(req, res, next) {
     try {
       const row = await service.cambiarEstado(req.params.id, req.body.estado, userOf(req));

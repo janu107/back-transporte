@@ -20,6 +20,8 @@ router.get('/v2/reversibles', authMiddleware, permitirRoles(), ctrlV2.reversible
 router.post('/v2/revertir/:id_liquidacion', authMiddleware, permitirRoles(), ctrlV2.revertir);
 router.get('/v2/detalle/:id_liquidacion', authMiddleware, ctrlV2.detalle);
 router.get('/v2/sobregiros', authMiddleware, ctrlV2.sobregiros);
+// [V9 §7] Detalle de sobregiros por liquidación y transportista (solo consulta).
+router.get('/v2/sobregiros/detalle', authMiddleware, ctrlV2.sobregirosDetalle);
 router.get('/v2/sobregiros/:id_transportista/abonos', authMiddleware, ctrlV2.abonos);
 router.post('/v2/abonos', authMiddleware, ctrlV2.registrarAbono);
 router.get('/v2/reporte-liquidaciones', authMiddleware, ctrlV2.reporte);

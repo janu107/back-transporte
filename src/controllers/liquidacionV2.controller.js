@@ -47,6 +47,9 @@ module.exports = {
   sobregiros: (req, res, next) => responder(
     res, next, () => service.sobregiros()
   ),
+  sobregirosDetalle: (req, res, next) => responder(
+    res, next, () => service.sobregirosDetalle()
+  ),
   abonos: (req, res, next) => responder(
     res, next, () => service.abonos(req.params.id_transportista)
   ),

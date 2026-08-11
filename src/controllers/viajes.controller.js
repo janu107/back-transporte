@@ -3,6 +3,7 @@
  * REGISTRO DE VIAJES (Detalle de Póliza / Envíos) sobre pro_poliza_detalle.
  */
 const service = require('../services/viajes.service');
+const cargaMasiva = require('../services/cargaMasivaViajes.service');
 const { success } = require('../utils/response');
 
 const userOf = (req) => (req.user && req.user.usuario) || 'sistema';
@@ -57,8 +58,25 @@ module.exports = {
   async tarifasPoliza(req, res, next) {
     try {
       success(res, await service.tarifasDePoliza(
+        req.params.idPoliza, req.query.fecha_inicio, req.query.fecha_fin,
+        req.query.id_transportista
+      ));
+    } catch (e) { next(e); }
+  },
+
+  /** GET /viajes/poliza/:idPoliza/transportistas — transportistas con envíos en el rango. */
+  async transportistasPoliza(req, res, next) {
+    try {
+      success(res, await service.transportistasDePoliza(
         req.params.idPoliza, req.query.fecha_inicio, req.query.fecha_fin
       ));
+    } catch (e) { next(e); }
+  },
+
+  /** GET /viajes/poliza/:idPoliza/puntos — puntos de embarque que tuvo la póliza. */
+  async puntosPoliza(req, res, next) {
+    try {
+      success(res, await service.puntosDePoliza(req.params.idPoliza));
     } catch (e) { next(e); }
   },
 
@@ -71,9 +89,24 @@ module.exports = {
         req.body.nueva_tarifa,
         req.body.fecha_inicio,
         req.body.fecha_fin,
-        userOf(req)
+        userOf(req),
+        req.body.id_transportista
       );
       success(res, r, `Se actualizaron ${r.actualizados} envío(s).`);
+    } catch (e) { next(e); }
+  },
+
+  /**
+   * POST /viajes/carga-masiva — carga de viajes locales desde archivo.
+   * Con `aplicar: false` solo valida y devuelve la vista previa.
+   */
+  async cargaMasiva(req, res, next) {
+    try {
+      const r = await cargaMasiva.procesar(req.body, userOf(req));
+      const mensaje = r.aplicado
+        ? `Se cargaron ${r.insertados} viaje(s).${r.con_error ? ` ${r.con_error} fila(s) omitida(s).` : ''}`
+        : `Vista previa: ${r.validas} fila(s) válida(s), ${r.con_error} con error.`;
+      success(res, r, mensaje, r.aplicado ? 201 : 200);
     } catch (e) { next(e); }
   },
 };
