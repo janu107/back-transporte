@@ -1,19 +1,25 @@
 /**
- * cargaMasivaViajes.service.js — [V9 §1] CARGA MASIVA DE VIAJES LOCALES.
+ * cargaMasivaViajes.service.js — [V9 §1] CARGA MASIVA DE VIAJES.
  *
- * Recibe las filas de un archivo (Excel/CSV) con 7 columnas, en el mismo orden
- * que el proceso legacy:
- *   1 LICENCIA · 2 TIPCA · 3 PLACA · 4 PUNTO · 5 PESO · 6 FECHA · 7 VALOR
+ * Recibe las filas de un archivo (Excel/CSV) con 9 columnas, en este orden:
+ *   1 LICENCIA · 2 ENVIO · 3 TIPO · 4 PLACA · 5 PUNTO · 6 PESO
+ *   7 CANTIDAD_BULTO · 8 FECHA · 9 VALOR
  * La póliza NO viene en el archivo: es la seleccionada en pantalla.
  *
- * Normalización equivalente a la del legacy:
- *   LICENCIA -> sin espacios      TIPCA -> mayúsculas
- *   PLACA    -> recortada         PUNTO/PESO/VALOR -> numéricos
- *   FECHA    -> DD/MM/AAAA
+ * TIPO define de dónde sale el número de envío:
+ *   C (Carta de Porte) -> correlativo automático del sistema (ignora la columna)
+ *   V (Viaje local)    -> se usa el número que trae el Excel
  *
- * Valida fila por fila y devuelve el detalle de las correctas y de las
- * rechazadas con su motivo. Al aplicar solo se insertan las correctas, dentro
- * de una transacción, respetando el saldo de piezas y de peso de la póliza.
+ * Normalizaciones:
+ *   LICENCIA -> sin espacios
+ *   PLACA    -> sin espacios y sin los prefijos C-, P-, C, P
+ *   FECHA    -> DD/MM/AAAA (también acepta AAAA-MM-DD y fechas de Excel)
+ *   PUNTO / PESO / CANTIDAD_BULTO / VALOR -> numéricos
+ *
+ * Valida fila por fila —placa, licencia, punto, tipo y póliza deben existir— y
+ * devuelve el detalle de las correctas y de las rechazadas con su motivo. Al
+ * aplicar solo se insertan las correctas, dentro de una transacción, respetando
+ * el saldo de peso de la póliza.
  */
 const { query, queryOne, withTransaction } = require('../database/db');
 const { siguienteCorrelativo } = require('../utils/correlativo');
@@ -21,6 +27,7 @@ const { obtenerPorcentajePagos } = require('./configuracion.service');
 
 const ESTADO_ANULADA = 'ANULADO';
 const TIPO_LOCAL = 'Viajes Locales';
+const TIPO_CARTA = 'Carta de Porte';
 
 function errorNegocio(mensaje, status = 409) {
   const e = new Error(mensaje);
@@ -31,6 +38,26 @@ function errorNegocio(mensaje, status = 409) {
 /** Quita todos los espacios (equivale a REPLACE(...,' ','') del legacy). */
 const sinEspacios = (v) => String(v ?? '').replace(/\s+/g, '');
 const recortar = (v) => String(v ?? '').trim();
+
+/**
+ * Normaliza una placa quitando espacios y los prefijos con que suele venir
+ * en los archivos: "C-123ABC", "P-123ABC", "C123ABC", "P123ABC" -> "123ABC".
+ * Solo se quita la letra suelta cuando lo que sigue empieza por dígito, para
+ * no mutilar placas que legítimamente comienzan con C o P.
+ */
+function normalizarPlaca(v) {
+  const s = sinEspacios(v).toUpperCase();
+  return s.replace(/^[CP]-/, '').replace(/^[CP](?=\d)/, '');
+}
+
+/** Tipo del archivo: C = Carta de Porte, V = Viaje local. */
+function normalizarTipo(v) {
+  const s = recortar(v).toUpperCase();
+  if (!s) return null;
+  if (s === 'C' || s.startsWith('CARTA')) return 'C';
+  if (s === 'V' || s.startsWith('VIAJE')) return 'V';
+  return null;
+}
 
 /** Convierte a número aceptando coma decimal y separadores de miles. */
 function aNumero(v) {
@@ -112,8 +139,17 @@ async function procesar({ id_poliza: idPoliza, filas = [], aplicar = false }, us
   ]);
 
   const porLicencia = new Map(pilotos.map((p) => [sinEspacios(p.licencia).toUpperCase(), p]));
-  const porPlaca = new Map(camiones.map((c) => [sinEspacios(c.placa).toUpperCase(), c]));
+  // Las placas se indexan normalizadas para que "C-123ABC" del archivo case con
+  // "123ABC" del catálogo (y viceversa).
+  const porPlaca = new Map(camiones.map((c) => [normalizarPlaca(c.placa), c]));
   const porTarifa = new Map(tarifas.map((t) => [Number(t.codigo), t]));
+
+  // Números de envío ya usados: evita duplicar los que vienen en el archivo.
+  const usados = await query(
+    'SELECT num_envio FROM pro_poliza_detalle WHERE num_envio IS NOT NULL'
+  );
+  const enviosExistentes = new Set(usados.map((r) => String(r.num_envio).trim()));
+  const enviosDelArchivo = new Set();
 
   const pesoPoliza = Number(poliza.peso_total || poliza.peso_kilogramos || 0);
   const piezasPoliza = Number(poliza.cantidad_piezas || 0);
@@ -130,10 +166,12 @@ async function procesar({ id_poliza: idPoliza, filas = [], aplicar = false }, us
     const motivos = [];
 
     const licencia = sinEspacios(cruda.licencia).toUpperCase();
-    const tipca = recortar(cruda.tipca).toUpperCase();
-    const placa = sinEspacios(cruda.placa).toUpperCase();
+    const envioArchivo = recortar(cruda.envio);
+    const tipo = normalizarTipo(cruda.tipo);
+    const placa = normalizarPlaca(cruda.placa);
     const punto = aNumero(cruda.punto);
     const peso = aNumero(cruda.peso);
+    const bultos = aNumero(cruda.cantidad_bulto);
     const fecha = aFecha(cruda.fecha);
     const valorArchivo = aNumero(cruda.valor);
 
@@ -147,11 +185,20 @@ async function procesar({ id_poliza: idPoliza, filas = [], aplicar = false }, us
     if (!placa) motivos.push('Falta la placa');
     else if (!camion) motivos.push(`Placa "${cruda.placa}" no registrada`);
 
+    if (!tipo) motivos.push(`Tipo "${cruda.tipo ?? ''}" inválido (use V o C)`);
+
     if (!Number.isFinite(punto)) motivos.push('Punto de embarque inválido');
     else if (!tarifa) motivos.push(`Punto de embarque ${punto} no existe`);
 
     if (!Number.isFinite(peso) || peso <= 0) motivos.push('Peso inválido');
     if (!fecha) motivos.push('Fecha inválida (use DD/MM/AAAA)');
+
+    // Viaje local (V): el número de envío lo trae el archivo y debe ser único.
+    if (tipo === 'V') {
+      if (!envioArchivo) motivos.push('Falta el número de envío (obligatorio para tipo V)');
+      else if (enviosExistentes.has(envioArchivo)) motivos.push(`El envío "${envioArchivo}" ya existe en el sistema`);
+      else if (enviosDelArchivo.has(envioArchivo)) motivos.push(`El envío "${envioArchivo}" está repetido en el archivo`);
+    }
 
     // El piloto debe pertenecer al transportista del camión (misma regla que la captura manual).
     if (piloto && camion && piloto.id_transportista != null && camion.id_transportista != null
@@ -159,13 +206,14 @@ async function procesar({ id_poliza: idPoliza, filas = [], aplicar = false }, us
       motivos.push('El piloto no pertenece al transportista de la placa');
     }
 
+    const datosCrudos = {
+      licencia: cruda.licencia ?? '', envio: cruda.envio ?? '', tipo: cruda.tipo ?? '',
+      placa: cruda.placa ?? '', punto: cruda.punto ?? '', peso: cruda.peso ?? '',
+      cantidad_bulto: cruda.cantidad_bulto ?? '', fecha: cruda.fecha ?? '', valor: cruda.valor ?? '',
+    };
+
     if (motivos.length) {
-      errores.push({
-        fila: nroFila, motivo: motivos.join('; '),
-        licencia: cruda.licencia ?? '', placa: cruda.placa ?? '',
-        punto: cruda.punto ?? '', fecha: cruda.fecha ?? '',
-        peso: cruda.peso ?? '', valor: cruda.valor ?? '',
-      });
+      errores.push({ fila: nroFila, motivo: motivos.join('; '), ...datosCrudos });
       return;
     }
 
@@ -174,14 +222,14 @@ async function procesar({ id_poliza: idPoliza, filas = [], aplicar = false }, us
       errores.push({
         fila: nroFila,
         motivo: `Excede el peso de la póliza (disponible ${(pesoPoliza - pesoAcumulado).toFixed(2)} kg)`,
-        licencia: cruda.licencia ?? '', placa: cruda.placa ?? '',
-        punto: cruda.punto ?? '', fecha: cruda.fecha ?? '',
-        peso: cruda.peso ?? '', valor: cruda.valor ?? '',
+        ...datosCrudos,
       });
       return;
     }
     pesoAcumulado += peso;
-    piezasAcumuladas += 0; // el archivo no trae piezas: los viajes locales entran con 0
+    const piezas = Number.isFinite(bultos) && bultos > 0 ? Math.round(bultos) : 0;
+    piezasAcumuladas += piezas;
+    if (tipo === 'V') enviosDelArchivo.add(envioArchivo);
 
     // Valor: se respeta el del archivo; si no viene, se calcula peso × factor × tarifa.
     const valor = Number.isFinite(valorArchivo) && valorArchivo >= 0
@@ -190,6 +238,10 @@ async function procesar({ id_poliza: idPoliza, filas = [], aplicar = false }, us
 
     validas.push({
       fila: nroFila,
+      tipo,
+      tipo_texto: tipo === 'C' ? TIPO_CARTA : TIPO_LOCAL,
+      // En tipo V el número viene del archivo; en tipo C lo asigna el sistema al guardar.
+      num_envio: tipo === 'V' ? envioArchivo : null,
       id_piloto: piloto.codigo,
       piloto: `${piloto.nombres} ${piloto.apellidos || ''}`.trim(),
       licencia: piloto.licencia,
@@ -200,9 +252,9 @@ async function procesar({ id_poliza: idPoliza, filas = [], aplicar = false }, us
       nit: camion.nit || '',
       id_tarifa_embarque: tarifa.codigo,
       embarque: tarifa.descripcion || `${tarifa.origen || ''} → ${tarifa.destino || ''}`,
-      tipca,
       fecha,
       peso: Number(peso.toFixed(2)),
+      cantidad_bulto: piezas,
       valor,
     });
   });
@@ -212,6 +264,9 @@ async function procesar({ id_poliza: idPoliza, filas = [], aplicar = false }, us
     total_filas: filas.length,
     validas: validas.length,
     con_error: errores.length,
+    cartas_porte: validas.filter((v) => v.tipo === 'C').length,
+    viajes_locales: validas.filter((v) => v.tipo === 'V').length,
+    total_bultos: validas.reduce((s, v) => s + v.cantidad_bulto, 0),
     peso_archivo: Number(validas.reduce((s, v) => s + v.peso, 0).toFixed(2)),
     valor_archivo: Number(validas.reduce((s, v) => s + v.valor, 0).toFixed(2)),
     peso_poliza: pesoPoliza,
@@ -235,7 +290,6 @@ async function procesar({ id_poliza: idPoliza, filas = [], aplicar = false }, us
       WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'pro_poliza_detalle'`
   );
   const existe = new Set(columnas.map((c) => c.nombre));
-  const observacion = (v) => `Carga masiva${v.tipca ? ` · ${v.tipca}` : ''}`;
   const posibles = [
     ['num_envio', (v) => v.num_envio],
     ['id_poliza', () => id],
@@ -244,12 +298,12 @@ async function procesar({ id_poliza: idPoliza, filas = [], aplicar = false }, us
     ['id_piloto', (v) => v.id_piloto],
     ['id_tarifa_embarque', (v) => v.id_tarifa_embarque],
     ['fecha', (v) => v.fecha],
-    ['tipo', () => TIPO_LOCAL],
-    ['cantidad_bultos_piezas', () => 0],
+    ['tipo', (v) => v.tipo_texto],
+    ['cantidad_bultos_piezas', (v) => v.cantidad_bulto],
     ['peso', (v) => v.peso],
     ['valor', (v) => v.valor],
     ['estado', () => 'ACTIVO'],
-    ['observaciones', observacion],
+    ['observaciones', () => 'Carga masiva'],
     ['usuario_graba', () => usuario || 'sistema'],
   ].filter(([nombre]) => existe.has(nombre));
 
@@ -260,8 +314,11 @@ async function procesar({ id_poliza: idPoliza, filas = [], aplicar = false }, us
   const insertados = await withTransaction(async (conn) => {
     let n = 0;
     for (const v of validas) {
-      // eslint-disable-next-line no-await-in-loop
-      v.num_envio = await siguienteCorrelativo(conn, 'pro_poliza_detalle', 'num_envio', anio);
+      // Tipo C: correlativo del sistema. Tipo V: el número que trajo el archivo.
+      if (v.tipo === 'C') {
+        // eslint-disable-next-line no-await-in-loop
+        v.num_envio = await siguienteCorrelativo(conn, 'pro_poliza_detalle', 'num_envio', anio);
+      }
       // eslint-disable-next-line no-await-in-loop
       await conn.query(
         `INSERT INTO \`pro_poliza_detalle\` (${colList}) VALUES (${marcadores})`,

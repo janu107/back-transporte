@@ -116,9 +116,8 @@ async function actualizar(id, data, usuario) {
     const [rows] = await conn.query('SELECT * FROM pro_detalle_facturas WHERE correlativo = ? FOR UPDATE', [correlativo]);
     const det = rows[0];
     if (!det) throw errorNegocio('Vale no encontrado.', 404);
-    if (String(det.origen || '').toUpperCase() !== 'M') {
-      throw errorNegocio('Solo se pueden editar vales manuales; los generados por el API no se modifican.', 400);
-    }
+    // Se permite corregir cualquier vale vigente (manual o generado por el API);
+    // el saldo de la factura se reajusta abajo. Un vale anulado se reactiva antes.
     if (String(det.estado || '').toUpperCase() === 'ANULADO') {
       throw errorNegocio('El vale está anulado: reactívelo antes de editarlo.', 400);
     }
