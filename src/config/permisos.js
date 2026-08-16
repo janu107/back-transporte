@@ -67,7 +67,8 @@ const MODULOS = {
 
   // ---- Liquidaciones ----
   liquidacionGeneracion: ['ADMIN', 'OPERA_LIQUIDACION'],
-  liquidacionReversion: ['ADMIN', 'OPERA_LIQUIDACION'],
+  // La reversión de liquidaciones es exclusiva de ADMIN.
+  liquidacionReversion: ['ADMIN'],
   liquidacionHistorial: ['ADMIN', 'OPERA_LIQUIDACION'],
   liquidacionSobregiros: ['ADMIN', 'OPERA_LIQUIDACION'],
 
@@ -87,6 +88,37 @@ const MODULOS = {
   // Pantalla de inicio: visible para cualquier rol autenticado.
   dashboard: TODOS,
 };
+
+/**
+ * Restricciones adicionales por módulo para los roles NO administradores.
+ * (ADMIN conserva el control total en todos los casos.)
+ *
+ *   registrar  -> pueden consultar y dar de alta, pero NO modificar ni anular
+ *                 lo ya registrado: en la lista solo les queda «imprimir».
+ *   consultar  -> solo lectura: sin ninguna acción sobre los registros.
+ */
+const RESTRICCION_NO_ADMIN = {
+  detallePolizas: 'registrar',   // Registro de viajes
+  anticipos: 'registrar',        // Anticipos / provisión
+  detalleFacturas: 'registrar',  // Vales de combustible
+  polizas: 'consultar',          // Pólizas: solo ADMIN las crea/edita
+  tarifaEmbarque: 'consultar',   // Tarifas de embarque: sin acciones
+};
+
+const OPS_RESTRINGIDAS = {
+  registrar: ['SELECT', 'INSERT'],
+  consultar: ['SELECT'],
+};
+
+/** Operaciones efectivas de un rol dentro de un módulo concreto. */
+function operacionesEn(rol, modulo) {
+  const base = OPERACIONES_POR_ROL[rol] || [];
+  if (rol === 'ADMIN') return base;
+  const restriccion = RESTRICCION_NO_ADMIN[modulo];
+  if (!restriccion) return base;
+  const permitidas = OPS_RESTRINGIDAS[restriccion] || [];
+  return base.filter((op) => permitidas.includes(op));
+}
 
 /** Método HTTP -> operación de la matriz. */
 function operacionDe(metodo) {
@@ -128,7 +160,7 @@ function puedeOperar(roles, modulo, operacion) {
   if (!permitidos) return false;
   const op = String(operacion || 'SELECT').toUpperCase();
   return normalizarRoles(roles).some(
-    (r) => permitidos.includes(r) && (OPERACIONES_POR_ROL[r] || []).includes(op)
+    (r) => permitidos.includes(r) && operacionesEn(r, modulo).includes(op)
   );
 }
 
@@ -140,8 +172,10 @@ function modulosPermitidos(roles) {
 module.exports = {
   OPERACIONES_POR_ROL,
   MODULOS,
+  RESTRICCION_NO_ADMIN,
   ROLES: TODOS,
   operacionDe,
+  operacionesEn,
   normalizarRoles,
   puedeVer,
   puedeOperar,
