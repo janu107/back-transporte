@@ -47,7 +47,9 @@ const MODULOS = {
   ubicacionBomba: ['ADMIN', 'OPERA_VIAJES', 'OPERA_VALES', 'CONSULTAS'],
   productos: ['ADMIN', 'OPERA_VIAJES', 'OPERA_VALES', 'CONSULTAS'],
   bombas: ['ADMIN', 'OPERA_VIAJES', 'OPERA_VALES', 'CONSULTAS'],
-  tarifaEmbarque: ['ADMIN', 'OPERA_LIQUIDACION'],
+  // Todos los roles necesitan LEER las tarifas: el registro de viajes las usa
+  // para calcular el valor del envío. Solo ADMIN las modifica (ver RESTRICCION_NO_ADMIN).
+  tarifaEmbarque: TODOS,
 
   // ---- Configuración ----
   empresas: ['ADMIN'],
