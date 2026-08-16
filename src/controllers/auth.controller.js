@@ -29,7 +29,10 @@ module.exports = {
         [req.user.codigo]
       );
       if (!u) return error(res, 'Usuario no encontrado', 404);
-      success(res, { ...u, rol: req.user.rol });
+      // Los roles se releen de la base: si cambian, la sesión los refleja sin
+      // tener que volver a iniciar sesión.
+      const roles = await authService.obtenerRoles(u.codigo);
+      success(res, { ...u, rol: roles[0] || req.user.rol, roles });
     } catch (e) { next(e); }
   },
 

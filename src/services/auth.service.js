@@ -5,22 +5,33 @@
  */
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
-const { queryOne, execute } = require('../database/db');
+const { query, queryOne, execute } = require('../database/db');
 const env = require('../config/env');
 
 const MAX_INTENTOS = 5;
 const BLOQUEO_MINUTOS = 15;
 
 /** Obtiene el primer rol activo del usuario (o 'USUARIO' por defecto). */
-async function obtenerRol(idUsuario) {
-  const row = await queryOne(
+/**
+ * Roles ACTIVOS del usuario. Un usuario puede tener varios: los permisos son
+ * la unión de todos (ver config/permisos.js).
+ */
+async function obtenerRoles(idUsuario) {
+  const filas = await query(
     `SELECT r.tipo_rol FROM adm_usuario_rol ur
        JOIN adm_roles r ON r.codigo = ur.id_rol
-      WHERE ur.id_usuario = ? AND ur.estado = 'ACTIVO'
-      ORDER BY ur.codigo LIMIT 1`,
+      WHERE ur.id_usuario = ? AND UPPER(ur.estado) = 'ACTIVO'
+        AND UPPER(COALESCE(r.estado, 'ACTIVO')) = 'ACTIVO'
+      ORDER BY ur.codigo`,
     [idUsuario]
   );
-  return row ? row.tipo_rol : 'USUARIO';
+  return [...new Set(filas.map((f) => String(f.tipo_rol).toUpperCase()))];
+}
+
+/** Primer rol del usuario (compatibilidad con lo que espera el frontend). */
+async function obtenerRol(idUsuario) {
+  const roles = await obtenerRoles(idUsuario);
+  return roles[0] || 'USUARIO';
 }
 
 /** Firma un JWT con los datos del usuario. */
@@ -67,17 +78,21 @@ async function login(usuario, contrasena) {
     [u.codigo]
   );
 
-  const rol = await obtenerRol(u.codigo);
+  const roles = await obtenerRoles(u.codigo);
+  const rol = roles[0] || 'USUARIO';
   const user = {
     codigo: u.codigo,
     usuario: u.usuario,
     nombre: u.nombre,
     correo: u.correo,
-    rol,
+    rol,   // principal (compatibilidad)
+    roles, // todos los asignados
     debe_cambiar_pwd: !!u.debe_cambiar_pwd,
   };
-  const token = firmarToken({ codigo: u.codigo, usuario: u.usuario, nombre: u.nombre, rol });
+  const token = firmarToken({
+    codigo: u.codigo, usuario: u.usuario, nombre: u.nombre, rol, roles,
+  });
   return { token, user };
 }
 
-module.exports = { login, firmarToken, obtenerRol };
+module.exports = { login, firmarToken, obtenerRol, obtenerRoles };

@@ -22,9 +22,9 @@ const dashboardRoutes = require('./dashboard.routes');
 const historialRoutes = require('./historial.routes');
 const bitacorasRoutes = require('./bitacoras.routes');
 
-// [v8] Autenticación + autorización por rol a nivel de módulo.
+// Autenticación + autorización por matriz de permisos (config/permisos.js).
 const auth = require('../middlewares/auth.middleware');
-const { permitirRoles, soloLecturaPara } = require('../middlewares/role.middleware');
+const { autorizar } = require('../middlewares/role.middleware');
 
 const router = Router();
 
@@ -32,36 +32,35 @@ const router = Router();
 router.use('/health', healthRoutes);
 router.use('/auth', authRoutes);
 
-// Seguridad / Configuración / Auditoría / Historial / Reportes -> solo ADMIN
-router.use('/usuarios', auth, permitirRoles(), usuariosRoutes);
-router.use('/roles', auth, permitirRoles(), rolesRoutes);
-router.use('/configuracion', auth, permitirRoles(), configuracionRoutes);
-router.use('/reportes', auth, permitirRoles(), reportesRoutes);
-router.use('/historial', auth, permitirRoles(), historialRoutes);
-router.use('/bitacoras', auth, permitirRoles(), bitacorasRoutes);
+// A partir de aquí TODO exige sesión y pasa por la matriz de permisos, que
+// resuelve el módulo según la URL y valida el rol y la operación (SELECT /
+// INSERT / UPDATE / DELETE). Lo que no esté mapeado se niega por defecto.
+router.use(auth, autorizar);
 
-// Catálogos -> ADMIN + OPERADOR (escritura); CONSULTOR solo lectura
-router.use('/catalogos', auth, permitirRoles('OPERADOR', 'CONSULTOR'), soloLecturaPara('CONSULTOR'), catalogosRoutes);
+router.use('/usuarios', usuariosRoutes);
+router.use('/roles', rolesRoutes);
+router.use('/configuracion', configuracionRoutes);
+router.use('/reportes', reportesRoutes);
+router.use('/historial', historialRoutes);
+router.use('/bitacoras', bitacorasRoutes);
+router.use('/catalogos', catalogosRoutes);
+router.use('/mantenimientos', mantenimientosRoutes);
+router.use('/procesos', procesosRoutes);
+router.use('/control-api', controlApiRoutes);
+router.use('/viajes', viajesRoutes);
+router.use('/anticipos', anticiposRoutes);
+router.use('/liquidacion', liquidacionRoutes);
+router.use('/detalle-factura', detalleFacturaRoutes);
+router.use('/dashboard', dashboardRoutes);
 
-// Mantenimientos -> ADMIN (escritura); OPERADOR solo lectura (para los combos de Procesos)
-router.use('/mantenimientos', auth, permitirRoles('OPERADOR'), soloLecturaPara('OPERADOR'), mantenimientosRoutes);
-
-// Procesos -> ADMIN + OPERADOR
-router.use('/procesos', auth, permitirRoles('OPERADOR'), procesosRoutes);
-router.use('/control-api', auth, permitirRoles('OPERADOR'), controlApiRoutes);
-router.use('/viajes', auth, permitirRoles('OPERADOR'), viajesRoutes);
-router.use('/anticipos', auth, permitirRoles('OPERADOR'), anticiposRoutes);
-router.use('/liquidacion', auth, permitirRoles('OPERADOR'), liquidacionRoutes);
-router.use('/detalle-factura', auth, permitirRoles('OPERADOR'), detalleFacturaRoutes);
-
-// Dashboard -> todos los roles (es la pantalla de inicio)
-router.use('/dashboard', auth, permitirRoles('OPERADOR', 'CONSULTOR'), dashboardRoutes);
-
-// NOTA: las asignaciones usuario-rol se exponen también bajo /usuario-rol -> solo ADMIN
+// Las asignaciones usuario-rol también se exponen bajo /usuario-rol.
 const rolesController = require('../controllers/roles.controller');
-router.get('/usuario-rol', auth, permitirRoles(), rolesController.listUsuarioRol);
-router.post('/usuario-rol', auth, permitirRoles(), rolesController.createUsuarioRol);
-router.put('/usuario-rol/:id', auth, permitirRoles(), rolesController.updateUsuarioRol);
-router.patch('/usuario-rol/:id/estado', auth, permitirRoles(), rolesController.changeEstadoUsuarioRol);
+router.get('/usuario-rol', rolesController.listUsuarioRol);
+// Vista por usuario y asignación de varios roles de una sola vez.
+router.get('/usuario-rol/por-usuario', rolesController.listPorUsuario);
+router.put('/usuario-rol/usuario/:idUsuario', rolesController.asignarRoles);
+router.post('/usuario-rol', rolesController.createUsuarioRol);
+router.put('/usuario-rol/:id', rolesController.updateUsuarioRol);
+router.patch('/usuario-rol/:id/estado', rolesController.changeEstadoUsuarioRol);
 
 module.exports = router;
