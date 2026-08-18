@@ -23,11 +23,19 @@ const QQ_A_KG = 45.359237;
 
 function bad(mensaje, status = 400) { const e = new Error(mensaje); e.status = status; return e; }
 
+/** 'YYYY-MM-DD' de un DATE de MySQL (que mysql2 puede entregar como objeto Date). */
+function aISO(v) {
+  if (!v) return null;
+  if (v instanceof Date) return v.toISOString().slice(0, 10);
+  return String(v).slice(0, 10);
+}
+
 async function generar(q = {}) {
   const idPoliza = Number(q.poliza_id);
   if (!idPoliza) throw bad('Debe indicar la póliza.');
-  if (!q.fecha_inicio || !q.fecha_fin) throw bad('Las fechas inicial y final son obligatorias.');
-  if (q.fecha_inicio > q.fecha_fin) throw bad('La fecha inicial no puede ser mayor que la fecha final.');
+  if (q.fecha_inicio && q.fecha_fin && q.fecha_inicio > q.fecha_fin) {
+    throw bad('La fecha inicial no puede ser mayor que la fecha final.');
+  }
   const idPunto = q.punto_embarque_id ? Number(q.punto_embarque_id) : null;
 
   const poliza = await queryOne(
@@ -42,12 +50,29 @@ async function generar(q = {}) {
     if (!puntoEmbarque) throw bad('El punto de embarque no existe.', 404);
   }
 
+  // Las fechas son OPCIONALES: quien pide el reporte no tiene por qué saber
+  // cuándo se hizo el primer viaje ni el último. La que falte se toma del
+  // propio historial de la póliza (y del punto de embarque, si se filtró).
+  const rangoCond = ['id_poliza = ?', "estado <> 'ANULADO'"];
+  const rangoParams = [idPoliza];
+  if (idPunto) { rangoCond.push('id_tarifa_embarque = ?'); rangoParams.push(idPunto); }
+  const rangoReal = await queryOne(
+    `SELECT MIN(fecha) AS primera, MAX(fecha) AS ultima
+       FROM pro_poliza_detalle WHERE ${rangoCond.join(' AND ')}`,
+    rangoParams
+  );
+  const fechaInicio = q.fecha_inicio || aISO(rangoReal?.primera);
+  const fechaFin = q.fecha_fin || aISO(rangoReal?.ultima);
+  // Si la póliza aún no tiene viajes, MIN/MAX vienen nulos: el reporte sale
+  // vacío pero con el resumen de la póliza, sin reventar por un BETWEEN NULL.
+
   // --- Arrastre (acumulado real de la póliza hasta fecha_fin, sin límite inferior) ---
   // Nota: "no ANULADO" (no "= ACTIVO") para incluir también LIQUIDADO, igual que
   // viajes.service.js:resumenPoliza() — hoy ningún viaje llega a LIQUIDADO desde
   // el frontend, pero el reporte no debe quedar ciego si eso cambia.
-  const arrCond = ['id_poliza = ?', "estado <> 'ANULADO'", 'fecha <= ?'];
-  const arrParams = [idPoliza, q.fecha_fin];
+  const arrCond = ['id_poliza = ?', "estado <> 'ANULADO'"];
+  const arrParams = [idPoliza];
+  if (fechaFin) { arrCond.push('fecha <= ?'); arrParams.push(fechaFin); }
   if (idPunto) { arrCond.push('id_tarifa_embarque = ?'); arrParams.push(idPunto); }
   const arrastre = await queryOne(
     `SELECT COALESCE(SUM(cantidad_bultos_piezas),0) AS piezas, COALESCE(SUM(peso),0) AS peso_kg
@@ -60,21 +85,28 @@ async function generar(q = {}) {
   // --- Saldo corriente: punto de partida = total de la póliza menos lo consumido
   // por viajes ANTERIORES al rango, para que el saldo de la primera fila del rango
   // continúe desde donde iba. ---
-  const preCond = ['id_poliza = ?', "estado <> 'ANULADO'", 'fecha < ?'];
-  const preParams = [idPoliza, q.fecha_inicio];
-  if (idPunto) { preCond.push('id_tarifa_embarque = ?'); preParams.push(idPunto); }
-  const previo = await queryOne(
-    `SELECT COALESCE(SUM(cantidad_bultos_piezas),0) AS piezas, COALESCE(SUM(peso),0) AS peso_kg
-       FROM pro_poliza_detalle WHERE ${preCond.join(' AND ')}`,
-    preParams
-  );
+  // Sin fecha inicial no hay "viajes anteriores": el saldo arranca en el total
+  // de la póliza, que es justo lo que se quiere al ver el historial completo.
+  let previo = { piezas: 0, peso_kg: 0 };
+  if (fechaInicio) {
+    const preCond = ['id_poliza = ?', "estado <> 'ANULADO'", 'fecha < ?'];
+    const preParams = [idPoliza, fechaInicio];
+    if (idPunto) { preCond.push('id_tarifa_embarque = ?'); preParams.push(idPunto); }
+    previo = await queryOne(
+      `SELECT COALESCE(SUM(cantidad_bultos_piezas),0) AS piezas, COALESCE(SUM(peso),0) AS peso_kg
+         FROM pro_poliza_detalle WHERE ${preCond.join(' AND ')}`,
+      preParams
+    );
+  }
   let saldoPiezasCorr = Number(poliza.cantidad_piezas || 0) - Number(previo.piezas || 0);
   let saldoPesoCorr = Number(poliza.peso_kilogramos || 0) - Number(previo.peso_kg || 0);
 
   // --- Detalle (acotado al rango de fechas consultado). Se ordena cronológicamente
   // (fecha, correlativo) para calcular el saldo corriente fila a fila. ---
-  const detCond = ['v.id_poliza = ?', "v.estado <> 'ANULADO'", 'v.fecha BETWEEN ? AND ?'];
-  const detParams = [idPoliza, q.fecha_inicio, q.fecha_fin];
+  const detCond = ['v.id_poliza = ?', "v.estado <> 'ANULADO'"];
+  const detParams = [idPoliza];
+  if (fechaInicio) { detCond.push('v.fecha >= ?'); detParams.push(fechaInicio); }
+  if (fechaFin) { detCond.push('v.fecha <= ?'); detParams.push(fechaFin); }
   if (idPunto) { detCond.push('v.id_tarifa_embarque = ?'); detParams.push(idPunto); }
   const filas = await query(
     `SELECT v.correlativo, v.num_envio, v.fecha, v.cantidad_bultos_piezas, v.peso,
@@ -128,6 +160,13 @@ async function generar(q = {}) {
   return {
     poliza: { codigo: poliza.codigo, nombre_poliza: poliza.nombre_poliza, estado: poliza.estado },
     punto_embarque: puntoEmbarque,
+    // Período realmente aplicado, para que el encabezado del reporte lo muestre
+    // aunque el usuario no haya escrito ninguna fecha.
+    rango: {
+      fecha_inicio: fechaInicio,
+      fecha_fin: fechaFin,
+      automatico: !q.fecha_inicio || !q.fecha_fin,
+    },
     resumen: {
       cantidad_piezas_poliza: Number(poliza.cantidad_piezas || 0),
       peso_kilogramos_poliza: Number(poliza.peso_kilogramos || 0),
