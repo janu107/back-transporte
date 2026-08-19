@@ -25,6 +25,16 @@ const FACTOR_KG_LB = 0.022046;
 const ESTADOS_VIAJE = ['ACTIVO', 'ANULADO', 'LIQUIDADO'];
 const ESTADO_ANULADA = 'ANULADO';
 
+// Los totales y el saldo cuentan SOLO los envíos ACTIVOS (los anulados liberan
+// sus piezas). Se usa COALESCE porque en la base hay filas viejas sin estado
+// grabado: el valor por omisión de la columna es ACTIVO, así que se tratan como
+// tales y no se pierden de la suma. Una sola constante para que lo que muestra
+// la pantalla y lo que valida el servidor no puedan discrepar.
+// `col` califica la columna cuando la consulta usa alias de tabla:
+// cat_tarifa_embarque también tiene `estado`, y sin alias MySQL la da por ambigua.
+const soloActivos = (col = 'estado') => `COALESCE(UPPER(TRIM(${col})), 'ACTIVO') = 'ACTIVO'`;
+const SOLO_ACTIVOS = soloActivos();
+
 /** Normaliza el estado a un valor válido del ENUM (default ACTIVO). */
 function normalizarEstadoViaje(v) {
   let e = String(v || '').toUpperCase();
@@ -87,8 +97,25 @@ async function resumenPoliza(idPoliza) {
             COALESCE(SUM(peso), 0) AS peso_usado,
             COUNT(*) AS viajes_realizados
        FROM pro_poliza_detalle
-      WHERE id_poliza = ? AND estado <> ?`,
-    [id, ESTADO_ANULADA]
+      WHERE id_poliza = ? AND ${SOLO_ACTIVOS}`,
+    [id]
+  );
+
+  // Desglose por punto de embarque (la tarifa del viaje): cuántos viajes y
+  // cuántas piezas lleva cada uno. No se toca man_poliza: el consumo se calcula
+  // sumando los envíos, así la póliza conserva siempre su cantidad original.
+  const puntos = await query(
+    `SELECT v.id_tarifa_embarque,
+            te.descripcion AS punto_desc, te.origen, te.destino,
+            COUNT(*) AS viajes,
+            COALESCE(SUM(v.cantidad_bultos_piezas), 0) AS piezas,
+            COALESCE(SUM(v.peso), 0) AS peso
+       FROM pro_poliza_detalle v
+       LEFT JOIN cat_tarifa_embarque te ON te.codigo = v.id_tarifa_embarque
+      WHERE v.id_poliza = ? AND ${soloActivos('v.estado')}
+      GROUP BY v.id_tarifa_embarque, te.descripcion, te.origen, te.destino
+      ORDER BY v.id_tarifa_embarque`,
+    [id]
   );
 
   const cantidadPiezas = Number(poliza.cantidad_piezas || 0);
@@ -111,6 +138,15 @@ async function resumenPoliza(idPoliza) {
     peso_usado: Number(pesoUsado.toFixed(2)),
     saldo_peso: Number((pesoTotal - pesoUsado).toFixed(2)),
     viajes_realizados: viajes,
+    puntos: puntos.map((r) => ({
+      id_tarifa_embarque: r.id_tarifa_embarque,
+      descripcion: r.id_tarifa_embarque
+        ? `${r.id_tarifa_embarque} · ${r.origen || '—'} → ${r.destino || '—'}`
+        : 'Sin punto de embarque',
+      viajes: Number(r.viajes || 0),
+      piezas: Number(r.piezas || 0),
+      peso: Number(Number(r.peso || 0).toFixed(2)),
+    })),
   };
 }
 
@@ -156,7 +192,7 @@ async function validarYNormalizar(data, excluirCorrelativo = null) {
   const piezas = Number(data.cantidad_bultos_piezas || 0);
   if (piezas < 0) throw errorNegocio('La cantidad de piezas no puede ser negativa.', 400);
 
-  const aggParams = [idPoliza, ESTADO_ANULADA];
+  const aggParams = [idPoliza];
   let excluir = '';
   if (excluirCorrelativo != null) {
     excluir = ' AND correlativo <> ?';
@@ -165,7 +201,7 @@ async function validarYNormalizar(data, excluirCorrelativo = null) {
   const agg = await queryOne(
     `SELECT COALESCE(SUM(cantidad_bultos_piezas), 0) AS usadas
        FROM pro_poliza_detalle
-      WHERE id_poliza = ? AND estado <> ?${excluir}`,
+      WHERE id_poliza = ? AND ${SOLO_ACTIVOS}${excluir}`,
     aggParams
   );
   const saldo = Number(poliza.cantidad_piezas || 0) - Number(agg.usadas || 0);
@@ -183,7 +219,7 @@ async function validarYNormalizar(data, excluirCorrelativo = null) {
     const aggPeso = await queryOne(
       `SELECT COALESCE(SUM(peso), 0) AS usado
          FROM pro_poliza_detalle
-        WHERE id_poliza = ? AND estado <> ?${excluir}`,
+        WHERE id_poliza = ? AND ${SOLO_ACTIVOS}${excluir}`,
       aggParams
     );
     const pesoUsado = Number(aggPeso.usado || 0);
@@ -297,13 +333,13 @@ async function validarCalcular(data) {
 
   // Se excluye el propio viaje cuando la validación viene de una edición.
   const excluir = data.correlativo ? ' AND correlativo <> ?' : '';
-  const params = [idPoliza, ESTADO_ANULADA];
+  const params = [idPoliza];
   if (data.correlativo) params.push(Number(data.correlativo));
 
   const agg = await queryOne(
     `SELECT COALESCE(SUM(cantidad_bultos_piezas), 0) AS usadas,
             COALESCE(SUM(peso), 0) AS peso_usado
-       FROM pro_poliza_detalle WHERE id_poliza = ? AND estado <> ?${excluir}`,
+       FROM pro_poliza_detalle WHERE id_poliza = ? AND ${SOLO_ACTIVOS}${excluir}`,
     params
   );
   const saldo = total - Number(agg.usadas || 0);
