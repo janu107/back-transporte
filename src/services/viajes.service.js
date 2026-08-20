@@ -125,6 +125,25 @@ async function resumenPoliza(idPoliza) {
   const pesoTotal = Number(poliza.peso_total || poliza.peso_kilogramos || 0);
   const pesoUsado = Number(agg.peso_usado || 0);
 
+  // Cada punto de embarque lleva SU PROPIO saldo contra el total de la póliza.
+  // Los puntos son tramos encadenados (PORTUARIA → PREDIO ARIZONA y después
+  // PREDIO ARIZONA → SIDEGUA) y las mismas piezas pasan por cada tramo, así que
+  // los saldos no se restan entre sí ni suman al total de la póliza.
+  const puntosConSaldo = puntos.map((r) => {
+    const piezasPunto = Number(r.piezas || 0);
+    return {
+      id_tarifa_embarque: r.id_tarifa_embarque,
+      descripcion: r.id_tarifa_embarque
+        ? `${r.id_tarifa_embarque} · ${r.origen || '—'} → ${r.destino || '—'}`
+        : 'Sin punto de embarque',
+      viajes: Number(r.viajes || 0),
+      piezas: piezasPunto,
+      peso: Number(Number(r.peso || 0).toFixed(2)),
+      saldo: cantidadPiezas - piezasPunto,
+      saldo_peso: Number((pesoTotal - Number(r.peso || 0)).toFixed(2)),
+    };
+  });
+
   return {
     id_poliza: id,
     nombre_poliza: poliza.nombre_poliza,
@@ -138,15 +157,7 @@ async function resumenPoliza(idPoliza) {
     peso_usado: Number(pesoUsado.toFixed(2)),
     saldo_peso: Number((pesoTotal - pesoUsado).toFixed(2)),
     viajes_realizados: viajes,
-    puntos: puntos.map((r) => ({
-      id_tarifa_embarque: r.id_tarifa_embarque,
-      descripcion: r.id_tarifa_embarque
-        ? `${r.id_tarifa_embarque} · ${r.origen || '—'} → ${r.destino || '—'}`
-        : 'Sin punto de embarque',
-      viajes: Number(r.viajes || 0),
-      piezas: Number(r.piezas || 0),
-      peso: Number(Number(r.peso || 0).toFixed(2)),
-    })),
+    puntos: puntosConSaldo,
   };
 }
 
@@ -188,11 +199,17 @@ async function validarYNormalizar(data, excluirCorrelativo = null) {
     }
   }
 
-  // 4) Saldo de piezas.
+  // 4) Saldo de piezas, POR PÓLIZA Y PUNTO DE EMBARQUE.
+  // Los puntos son tramos encadenados (PORTUARIA → PREDIO ARIZONA y luego
+  // PREDIO ARIZONA → SIDEGUA): las mismas piezas recorren cada tramo, así que
+  // cada uno lleva su propio saldo contra el total de la póliza. Sumarlos en
+  // una sola bolsa bloqueaba el segundo tramo con piezas que ya iban en camino.
   const piezas = Number(data.cantidad_bultos_piezas || 0);
   if (piezas < 0) throw errorNegocio('La cantidad de piezas no puede ser negativa.', 400);
 
-  const aggParams = [idPoliza];
+  const idTarifa = nz(data.id_tarifa_embarque);
+  // `<=>` compara aceptando NULL: los envíos sin punto forman su propio grupo.
+  const aggParams = [idPoliza, idTarifa];
   let excluir = '';
   if (excluirCorrelativo != null) {
     excluir = ' AND correlativo <> ?';
@@ -201,12 +218,13 @@ async function validarYNormalizar(data, excluirCorrelativo = null) {
   const agg = await queryOne(
     `SELECT COALESCE(SUM(cantidad_bultos_piezas), 0) AS usadas
        FROM pro_poliza_detalle
-      WHERE id_poliza = ? AND ${SOLO_ACTIVOS}${excluir}`,
+      WHERE id_poliza = ? AND id_tarifa_embarque <=> ?
+        AND ${SOLO_ACTIVOS}${excluir}`,
     aggParams
   );
   const saldo = Number(poliza.cantidad_piezas || 0) - Number(agg.usadas || 0);
   if (piezas > saldo) {
-    throw errorNegocio(`Las piezas del viaje (${piezas}) exceden el saldo disponible de la póliza (${saldo}).`);
+    throw errorNegocio(`Las piezas del viaje (${piezas}) exceden el saldo disponible de este punto de embarque (${saldo} de ${Number(poliza.cantidad_piezas || 0)}).`);
   }
 
   // 5) [V9 §5] Saldo de PESO: la suma de los envíos no puede exceder el peso
@@ -219,20 +237,20 @@ async function validarYNormalizar(data, excluirCorrelativo = null) {
     const aggPeso = await queryOne(
       `SELECT COALESCE(SUM(peso), 0) AS usado
          FROM pro_poliza_detalle
-        WHERE id_poliza = ? AND ${SOLO_ACTIVOS}${excluir}`,
+        WHERE id_poliza = ? AND id_tarifa_embarque <=> ?
+          AND ${SOLO_ACTIVOS}${excluir}`,
       aggParams
     );
     const pesoUsado = Number(aggPeso.usado || 0);
     const saldoPeso = pesoPoliza - pesoUsado;
     if (peso > saldoPeso) {
       throw errorNegocio(
-        `El peso del envío (${peso.toFixed(2)} kg) excede el saldo disponible de la póliza `
+        `El peso del envío (${peso.toFixed(2)} kg) excede el saldo disponible de este punto de embarque `
         + `(${saldoPeso.toFixed(2)} kg de ${pesoPoliza.toFixed(2)} kg; ya se usaron ${pesoUsado.toFixed(2)} kg).`
       );
     }
   }
 
-  const idTarifa = nz(data.id_tarifa_embarque);
   let valorTarifa = 0;
   if (idTarifa != null) {
     const tarifa = await queryOne(
@@ -333,18 +351,22 @@ async function validarCalcular(data) {
 
   // Se excluye el propio viaje cuando la validación viene de una edición.
   const excluir = data.correlativo ? ' AND correlativo <> ?' : '';
-  const params = [idPoliza];
+  // El saldo se cuenta por PÓLIZA Y PUNTO DE EMBARQUE: cada tramo mueve las
+  // mismas piezas de la póliza, así que lleva su propio consumo.
+  const params = [idPoliza, idTarifa];
   if (data.correlativo) params.push(Number(data.correlativo));
 
   const agg = await queryOne(
     `SELECT COALESCE(SUM(cantidad_bultos_piezas), 0) AS usadas,
             COALESCE(SUM(peso), 0) AS peso_usado
-       FROM pro_poliza_detalle WHERE id_poliza = ? AND ${SOLO_ACTIVOS}${excluir}`,
+       FROM pro_poliza_detalle
+      WHERE id_poliza = ? AND id_tarifa_embarque <=> ?
+        AND ${SOLO_ACTIVOS}${excluir}`,
     params
   );
   const saldo = total - Number(agg.usadas || 0);
   if (piezas > saldo) {
-    throw errorNegocio(`Se paso del saldo restante del envio. Saldo disponible: ${saldo} piezas.`);
+    throw errorNegocio(`Se paso del saldo restante de este punto de embarque. Saldo disponible: ${saldo} de ${total} piezas.`);
   }
 
   // [V9 §5] El peso acumulado de los envíos no puede exceder el de la póliza.
@@ -353,8 +375,8 @@ async function validarCalcular(data) {
   const saldoPeso = Number((pesoPoliza - pesoUsado).toFixed(2));
   if (pesoPoliza > 0 && peso > saldoPeso) {
     throw errorNegocio(
-      `El peso del envío (${peso.toFixed(2)} kg) excede el saldo disponible de la póliza `
-      + `(${saldoPeso.toFixed(2)} kg de ${pesoPoliza.toFixed(2)} kg).`
+      `El peso del envío (${peso.toFixed(2)} kg) excede el saldo disponible de este punto `
+      + `de embarque (${saldoPeso.toFixed(2)} kg de ${pesoPoliza.toFixed(2)} kg).`
     );
   }
 

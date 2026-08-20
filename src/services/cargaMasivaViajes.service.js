@@ -130,11 +130,19 @@ async function procesar({ id_poliza: idPoliza, filas = [], aplicar = false }, us
     query("SELECT codigo, licencia, nombres, apellidos, id_transportista FROM man_pilotos WHERE UPPER(COALESCE(estado,'ACTIVO')) = 'ACTIVO'"),
     query('SELECT c.codigo, c.placa, c.id_transportista, t.nombre_comercial, t.nit FROM man_camion c LEFT JOIN man_transportista t ON t.codigo = c.id_transportista'),
     query('SELECT codigo, descripcion, origen, destino, valor FROM cat_tarifa_embarque'),
-    queryOne(
-      `SELECT COALESCE(SUM(cantidad_bultos_piezas), 0) AS piezas,
+    // Lo ya consumido se agrupa POR PUNTO DE EMBARQUE: los puntos son tramos
+    // encadenados (PORTUARIA → PREDIO ARIZONA y luego PREDIO ARIZONA → SIDEGUA)
+    // y las mismas piezas recorren cada tramo, así que cada uno lleva su propio
+    // saldo contra el total de la póliza. Sumarlos todos juntos rechazaba
+    // archivos correctos con el peso que ya iba en camino por otro tramo.
+    query(
+      `SELECT id_tarifa_embarque,
+              COALESCE(SUM(cantidad_bultos_piezas), 0) AS piezas,
               COALESCE(SUM(peso), 0) AS peso
-         FROM pro_poliza_detalle WHERE id_poliza = ? AND estado <> ?`,
-      [id, ESTADO_ANULADA]
+         FROM pro_poliza_detalle
+        WHERE id_poliza = ? AND COALESCE(UPPER(TRIM(estado)), 'ACTIVO') = 'ACTIVO'
+        GROUP BY id_tarifa_embarque`,
+      [id]
     ),
   ]);
 
@@ -153,8 +161,12 @@ async function procesar({ id_poliza: idPoliza, filas = [], aplicar = false }, us
 
   const pesoPoliza = Number(poliza.peso_total || poliza.peso_kilogramos || 0);
   const piezasPoliza = Number(poliza.cantidad_piezas || 0);
-  let pesoAcumulado = Number(usadas.peso || 0);
-  let piezasAcumuladas = Number(usadas.piezas || 0);
+  // Acumulado por punto de embarque: arranca con lo que ya está grabado y va
+  // creciendo con las filas del archivo, tramo por tramo.
+  const pesoPorPunto = new Map(usadas.map((u) => [Number(u.id_tarifa_embarque), Number(u.peso || 0)]));
+  const piezasPorPunto = new Map(usadas.map((u) => [Number(u.id_tarifa_embarque), Number(u.piezas || 0)]));
+  const pesoDe = (pt) => pesoPorPunto.get(Number(pt)) || 0;
+  const piezasDe = (pt) => piezasPorPunto.get(Number(pt)) || 0;
 
   const factor = await obtenerPorcentajePagos();
   const validas = [];
@@ -217,18 +229,32 @@ async function procesar({ id_poliza: idPoliza, filas = [], aplicar = false }, us
       return;
     }
 
-    // Saldo de peso de la póliza (acumulado a lo largo del archivo).
-    if (pesoPoliza > 0 && pesoAcumulado + peso > pesoPoliza) {
+    // Saldo de peso DEL PUNTO DE EMBARQUE de esta fila, acumulando lo que ya
+    // llevan las filas anteriores del mismo tramo.
+    // `punto` de la fila ya identificó la tarifa; se usa su código como tramo.
+    const codPunto = Number(tarifa.codigo);
+    const pesoTramo = pesoDe(codPunto);
+    if (pesoPoliza > 0 && pesoTramo + peso > pesoPoliza) {
       errores.push({
         fila: nroFila,
-        motivo: `Excede el peso de la póliza (disponible ${(pesoPoliza - pesoAcumulado).toFixed(2)} kg)`,
+        motivo: `Excede el peso de este punto de embarque (disponible `
+          + `${(pesoPoliza - pesoTramo).toFixed(2)} kg de ${pesoPoliza.toFixed(2)} kg)`,
         ...datosCrudos,
       });
       return;
     }
-    pesoAcumulado += peso;
     const piezas = Number.isFinite(bultos) && bultos > 0 ? Math.round(bultos) : 0;
-    piezasAcumuladas += piezas;
+    if (piezasPoliza > 0 && piezasDe(codPunto) + piezas > piezasPoliza) {
+      errores.push({
+        fila: nroFila,
+        motivo: `Excede las piezas de este punto de embarque (disponible `
+          + `${piezasPoliza - piezasDe(codPunto)} de ${piezasPoliza})`,
+        ...datosCrudos,
+      });
+      return;
+    }
+    pesoPorPunto.set(codPunto, pesoTramo + peso);
+    piezasPorPunto.set(codPunto, piezasDe(codPunto) + piezas);
     if (tipo === 'V') enviosDelArchivo.add(envioArchivo);
 
     // Valor: se respeta el del archivo; si no viene, se calcula peso × factor × tarifa.
@@ -270,8 +296,10 @@ async function procesar({ id_poliza: idPoliza, filas = [], aplicar = false }, us
     peso_archivo: Number(validas.reduce((s, v) => s + v.peso, 0).toFixed(2)),
     valor_archivo: Number(validas.reduce((s, v) => s + v.valor, 0).toFixed(2)),
     peso_poliza: pesoPoliza,
-    peso_usado_antes: Number(usadas.peso || 0),
-    saldo_peso_despues: Number((pesoPoliza - pesoAcumulado).toFixed(2)),
+    // Se informa el tramo que queda más ajustado, que es el que puede frenar
+    // la siguiente carga.
+    peso_usado_antes: Number(Math.max(0, ...usadas.map((u) => Number(u.peso || 0)), 0).toFixed(2)),
+    saldo_peso_despues: Number((pesoPoliza - Math.max(0, ...pesoPorPunto.values(), 0)).toFixed(2)),
     piezas_poliza: piezasPoliza,
   };
 
