@@ -64,6 +64,10 @@ const MODULOS = {
 
   // ---- Procesos ----
   detallePolizas: ['ADMIN', 'OPERA_VIAJES', 'OPERA_VALES', 'CONSULTAS'],
+  // Corregir el peso de un envío (y recalcular su valor) es una operación
+  // acotada: la tienen los roles que registran y liquidan viajes, aunque no
+  // puedan editar el resto del envío.
+  detallePolizasPeso: ['ADMIN', 'OPERA_VIAJES', 'OPERA_LIQUIDACION'],
   anticipos: ['ADMIN', 'OPERA_VIAJES', 'OPERA_VALES', 'CONSULTAS'],
   detalleFacturas: ['ADMIN', 'OPERA_VALES', 'CONSULTAS'],
 

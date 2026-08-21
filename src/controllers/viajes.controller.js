@@ -54,6 +54,14 @@ module.exports = {
     } catch (e) { next(e); }
   },
 
+  // Cambia solo el peso; el valor lo recalcula el servicio.
+  async actualizarPeso(req, res, next) {
+    try {
+      const r = await service.actualizarPeso(req.params.id, req.body?.peso, req.usuario?.usuario);
+      return success(res, r, "Peso actualizado; el valor se recalculó.");
+    } catch (e) { return next(e); }
+  },
+
   /** GET /viajes/poliza/:idPoliza/tarifas — tarifas usadas por los envíos de la póliza. */
   async tarifasPoliza(req, res, next) {
     try {

@@ -396,6 +396,72 @@ async function validarCalcular(data) {
   };
 }
 
+/**
+ * actualizarPeso — cambia ÚNICAMENTE el peso de un envío y recalcula su valor.
+ *
+ * Va aparte de actualizar() a propósito: los roles operativos pueden corregir un
+ * peso mal digitado, pero no reasignar póliza, placa, piloto ni piezas. Al ser
+ * una operación distinta, se le da permiso propio sin abrirles la edición completa.
+ */
+async function actualizarPeso(id, peso, usuario) {
+  const correlativo = requerirNumero(id, 'correlativo');
+  const viaje = await queryOne(
+    'SELECT correlativo, id_poliza, id_tarifa_embarque, peso, estado '
+    + 'FROM `pro_poliza_detalle` WHERE `correlativo` = ?',
+    [correlativo]
+  );
+  if (!viaje) throw errorNegocio('Viaje no encontrado.', 404);
+  if (String(viaje.estado).toUpperCase() === ESTADO_ANULADA) {
+    throw errorNegocio('No se puede cambiar el peso de un viaje anulado.');
+  }
+
+  const nuevoPeso = Number(peso);
+  if (!Number.isFinite(nuevoPeso) || nuevoPeso < 0) {
+    throw errorNegocio('El peso debe ser un número mayor o igual a cero.', 400);
+  }
+
+  // El peso del tramo tampoco puede pasarse. Se descuenta el propio registro para
+  // que volver a guardar no se rechace a sí mismo por el peso que ya tenía.
+  const poliza = await queryOne(
+    'SELECT peso_total, peso_kilogramos FROM man_poliza WHERE codigo = ?', [viaje.id_poliza]
+  );
+  const pesoPoliza = Number(poliza?.peso_total || poliza?.peso_kilogramos || 0);
+  if (pesoPoliza > 0) {
+    const agg = await queryOne(
+      `SELECT COALESCE(SUM(peso), 0) AS usado
+         FROM pro_poliza_detalle
+        WHERE id_poliza = ? AND id_tarifa_embarque <=> ?
+          AND ${SOLO_ACTIVOS} AND correlativo <> ?`,
+      [viaje.id_poliza, viaje.id_tarifa_embarque, correlativo]
+    );
+    const saldo = pesoPoliza - Number(agg.usado || 0);
+    if (nuevoPeso > saldo) {
+      throw errorNegocio(
+        `El peso (${nuevoPeso.toFixed(2)} kg) excede el saldo disponible de este `
+        + `punto de embarque (${saldo.toFixed(2)} kg de ${pesoPoliza.toFixed(2)} kg).`
+      );
+    }
+  }
+
+  // El valor se recalcula aquí; no se acepta el que venga de la pantalla.
+  let valorTarifa = 0;
+  if (viaje.id_tarifa_embarque != null) {
+    const tarifa = await queryOne(
+      'SELECT valor FROM cat_tarifa_embarque WHERE codigo = ?', [viaje.id_tarifa_embarque]
+    );
+    valorTarifa = Number(tarifa?.valor || 0);
+  }
+  const factor = await obtenerPorcentajePagos();
+  const valor = calcularValor(nuevoPeso, valorTarifa, factor);
+
+  await execute(
+    'UPDATE `pro_poliza_detalle` SET `peso` = ?, `valor` = ?, `usuario_graba` = ? '
+    + 'WHERE `correlativo` = ?',
+    [nuevoPeso, valor, usuario || 'sistema', correlativo]
+  );
+  return queryOne('SELECT * FROM `pro_poliza_detalle` WHERE `correlativo` = ?', [correlativo]);
+}
+
 /** Actualiza un viaje (re-valida saldo excluyendo el propio registro). */
 async function actualizar(id, data, usuario) {
   const correlativo = requerirNumero(id, 'correlativo');
@@ -591,6 +657,7 @@ module.exports = {
   FACTOR_KG_LB,
   listar,
   resumenPoliza,
+  actualizarPeso,
   validarCalcular,
   crear,
   actualizar,

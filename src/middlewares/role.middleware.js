@@ -43,6 +43,9 @@ const RUTAS = [
 
   // Registro de viajes (detalle de póliza / envíos)
   [/^\/procesos\/poliza-detalle(\/|$)/, 'detallePolizas'],
+  // Antes que la regla general de /viajes: corregir el peso tiene su propio
+  // permiso y no debe caer bajo el del registro de viajes.
+  [/^\/viajes\/[^/]+\/peso\/?$/, 'detallePolizasPeso'],
   [/^\/viajes(\/|$)/, 'detallePolizas'],
   [/^\/procesos\/anticipo-provision(\/|$)/, 'anticipos'],
   [/^\/anticipos(\/|$)/, 'anticipos'],

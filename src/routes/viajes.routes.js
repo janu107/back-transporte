@@ -6,6 +6,7 @@
  *   POST  /viajes                  -> crear (valida saldo y reglas de negocio)
  *   PUT   /viajes/:id              -> actualizar
  *   PATCH /viajes/:id/estado       -> anular
+ *   PATCH /viajes/:id/peso         -> corregir el peso (recalcula el valor)
  */
 const { Router } = require('express');
 const ctrl = require('../controllers/viajes.controller');
@@ -26,5 +27,8 @@ router.post('/carga-masiva', authMiddleware, ctrl.cargaMasiva);
 router.post('/', authMiddleware, ctrl.create);
 router.put('/:id', authMiddleware, ctrl.update);
 router.patch('/:id/estado', authMiddleware, ctrl.changeEstado);
+// Solo el peso: tiene permiso propio, para que los roles operativos puedan
+// corregirlo sin quedar habilitados a editar el resto del envío.
+router.patch('/:id/peso', authMiddleware, ctrl.actualizarPeso);
 
 module.exports = router;
