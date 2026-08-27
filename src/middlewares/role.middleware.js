@@ -62,6 +62,9 @@ const RUTAS = [
 
   [/^\/reportes\/diesel(\/|$)/, 'reporteDiesel'],
   [/^\/reportes\/arrastre-polizas(\/|$)/, 'arrastrePolizas'],
+  [/^\/reportes\/transportista\/lista\/?$/, 'reporteTransportista'],
+  [/^\/reportes\/transportista(\/|$)/, 'reporteTransportista'],
+  [/^\/reportes\/polizas-transportistas(\/|$)/, 'polizasPorTransportista'],
   [/^\/reportes\/viajes-poliza(\/|$)/, 'viajesPorPoliza'],
   [/^\/reportes\/polizas-pendientes(\/|$)/, 'polizasPendientes'],
   [/^\/reportes\/anticipos-poliza(\/|$)/, 'anticiposTransportistas'],

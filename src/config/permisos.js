@@ -83,6 +83,10 @@ const MODULOS = {
   reporteDiesel: ['ADMIN', 'OPERA_VALES', 'OPERA_LIQUIDACION', 'CONSULTAS'],
   arrastreDiesel: ['ADMIN', 'OPERA_VALES', 'OPERA_LIQUIDACION', 'CONSULTAS'],
   arrastrePolizas: TODOS,
+  // Reportes nuevos por transportista: los ve quien registra viajes,
+  // quien liquida y quien solo consulta.
+  reporteTransportista: ['ADMIN', 'OPERA_VIAJES', 'OPERA_LIQUIDACION', 'CONSULTAS'],
+  polizasPorTransportista: ['ADMIN', 'OPERA_VIAJES', 'OPERA_LIQUIDACION', 'CONSULTAS'],
   viajesPorPoliza: TODOS,
   polizasPendientes: TODOS,
   anticiposTransportistas: ['ADMIN', 'OPERA_VIAJES', 'OPERA_VALES', 'CONSULTAS'],
@@ -107,7 +111,8 @@ const RESTRICCION_NO_ADMIN = {
   detallePolizas: 'registrar',   // Registro de viajes
   anticipos: 'registrar',        // Anticipos / provisión
   detalleFacturas: 'registrar',  // Vales de combustible
-  polizas: 'consultar',          // Pólizas: solo ADMIN las crea/edita
+  // Pólizas: OPERA_VIAJES da de alta nuevas; los demás roles solo consultan.
+  polizas: { OPERA_VIAJES: 'registrar', POR_DEFECTO: 'consultar' },
   tarifaEmbarque: 'consultar',   // Tarifas de embarque: sin acciones
 };
 
@@ -122,7 +127,14 @@ function operacionesEn(rol, modulo) {
   if (rol === 'ADMIN') return base;
   const restriccion = RESTRICCION_NO_ADMIN[modulo];
   if (!restriccion) return base;
-  const permitidas = OPS_RESTRINGIDAS[restriccion] || [];
+  // La restricción puede ser la misma para todos (cadena) o distinta por rol
+  // (objeto con POR_DEFECTO), como en Pólizas: OPERA_VIAJES registra y el resto
+  // solo consulta.
+  const clave = typeof restriccion === 'string'
+    ? restriccion
+    : (restriccion[rol] || restriccion.POR_DEFECTO);
+  if (!clave) return base;
+  const permitidas = OPS_RESTRINGIDAS[clave] || [];
   return base.filter((op) => permitidas.includes(op));
 }
 

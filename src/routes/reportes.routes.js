@@ -8,6 +8,7 @@ const { Router } = require('express');
 const authMiddleware = require('../middlewares/auth.middleware');
 const reporteDiesel = require('../services/reporteDiesel.service');
 const reporteArrastre = require('../services/reporteArrastre.service');
+const reporteTransportista = require('../services/reporteTransportista.service');
 const reporteViajesPoliza = require('../services/reporteViajesPoliza.service');
 const reportePolizasPendientes = require('../services/reportePolizasPendientes.service');
 const reporteAnticiposPoliza = require('../services/reporteAnticiposPoliza.service');
@@ -27,6 +28,35 @@ router.get('/diesel', authMiddleware, async (req, res, next) => {
 router.get('/arrastre-polizas', authMiddleware, async (req, res, next) => {
   try {
     success(res, await reporteArrastre.generar(req.query));
+  } catch (e) {
+    if (e.status) return error(res, e.message, e.status);
+    next(e);
+  }
+});
+
+// Reporte por transportista: resumen de sus pólizas activas.
+router.get('/transportista/lista', authMiddleware, async (req, res, next) => {
+  try {
+    success(res, await reporteTransportista.transportistas());
+  } catch (e) {
+    if (e.status) return error(res, e.message, e.status);
+    next(e);
+  }
+});
+
+router.get('/transportista', authMiddleware, async (req, res, next) => {
+  try {
+    success(res, await reporteTransportista.porTransportista(req.query));
+  } catch (e) {
+    if (e.status) return error(res, e.message, e.status);
+    next(e);
+  }
+});
+
+// Matriz de pólizas activas contra los transportistas que trabajan en cada una.
+router.get('/polizas-transportistas', authMiddleware, async (req, res, next) => {
+  try {
+    success(res, await reporteTransportista.resumenPolizasTransportistas());
   } catch (e) {
     if (e.status) return error(res, e.message, e.status);
     next(e);
