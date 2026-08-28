@@ -11,6 +11,8 @@ const authMiddleware = require('../middlewares/auth.middleware');
 const router = Router();
 
 router.get('/:recurso', authMiddleware, ctrl.list);
+// Va antes de /:recurso/:id, o «estados» se tomaría como el id de un registro.
+router.get('/:recurso/estados', authMiddleware, ctrl.estados);
 router.get('/:recurso/:id', authMiddleware, ctrl.getById);
 router.post('/:recurso', authMiddleware, ctrl.create);
 router.put('/:recurso/:id', authMiddleware, ctrl.update);
