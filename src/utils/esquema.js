@@ -64,4 +64,65 @@ async function sqlActivo(tabla, alias) {
   return `UPPER(COALESCE(${col}, 'ACTIVO')) NOT IN ('ANULADO', 'ANULADA')`;
 }
 
-module.exports = { existeColumna, existeTabla, sqlTransportistaDe, sqlActivo };
+/**
+ * Lo que ACEPTA la columna `estado` de una tabla, leído del catálogo:
+ *   { valores: ['A','B'] | null, longitud: 20 | null }
+ * `valores` solo viene cuando la columna es un ENUM; en un VARCHAR manda la
+ * longitud. Devuelve null si la tabla no tiene columna `estado`.
+ */
+const estadoCache = new Map();
+function estadoDeTabla(tabla) {
+  if (!estadoCache.has(tabla)) {
+    estadoCache.set(tabla, queryOne(
+      `SELECT COLUMN_TYPE AS tipo FROM information_schema.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = 'estado'`,
+      [tabla]
+    ).then((row) => {
+      const tipo = String(row?.tipo || '');
+      if (!tipo) return null;
+      const enumDef = tipo.match(/^enum\((.*)\)$/i);
+      if (enumDef) {
+        // Los valores vienen entrecomillados: 'ACTIVO','ANULADO'
+        const valores = enumDef[1]
+          .split(',')
+          .map((v) => v.trim().replace(/^'(.*)'$/, '$1').replace(/''/g, "'"))
+          .filter(Boolean);
+        return { valores, longitud: null };
+      }
+      const varchar = tipo.match(/^var?char\((\d+)\)$/i);
+      return { valores: null, longitud: varchar ? Number(varchar[1]) : null };
+    }).catch(() => null));
+  }
+  return estadoCache.get(tabla);
+}
+
+/**
+ * Estados que la tabla puede guardar DE VERDAD, considerando también su bitácora:
+ * los triggers copian el estado a `B<tabla>`, así que si esa columna es más
+ * estrecha el INSERT falla igual aunque la tabla principal sí lo acepte.
+ * Se devuelve la intersección de lo que aceptan ambas.
+ */
+async function estadosPermitidos(tabla) {
+  const propio = await estadoDeTabla(tabla);
+  if (!propio) return null;
+  const bitacora = (await existeTabla(`B${tabla}`)) ? await estadoDeTabla(`B${tabla}`) : null;
+
+  const valores = propio.valores && bitacora?.valores
+    ? propio.valores.filter((v) => bitacora.valores.includes(v))
+    : (propio.valores || bitacora?.valores || null);
+
+  const longitudes = [propio.longitud, bitacora?.longitud].filter((n) => Number.isFinite(n));
+  return {
+    valores,
+    longitud: longitudes.length ? Math.min(...longitudes) : null,
+  };
+}
+
+module.exports = {
+  existeColumna,
+  existeTabla,
+  sqlTransportistaDe,
+  sqlActivo,
+  estadoDeTabla,
+  estadosPermitidos,
+};

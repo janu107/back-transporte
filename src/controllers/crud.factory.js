@@ -42,6 +42,14 @@ function buildHandlers(resolveDef) {
         success(res, row, 'Registro actualizado correctamente');
       } catch (e) { next(e); }
     },
+    // Estados que la columna admite de verdad, para que la pantalla ofrezca
+    // solo esos en lugar de una lista fija que la base puede rechazar.
+    async estados(req, res, next) {
+      try {
+        const def = resolveDef(req);
+        success(res, await crud.estadosDe(def));
+      } catch (e) { next(e); }
+    },
     async changeEstado(req, res, next) {
       try {
         const def = resolveDef(req);
