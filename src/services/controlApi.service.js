@@ -8,6 +8,12 @@
  *   Ese servicio ejecuta sp_confirmar_despacho_api, actualiza saldo, marca el vale
  *   como 'C', genera el PDF y envía el correo (Brevo). Nuestro backend YA NO ejecuta
  *   el SP directamente para evitar doble confirmación.
+ *
+ *   La FACTURA contra la que se cobra la elige el usuario en pantalla. Como el
+ *   servicio externo no recibe ese dato, se deja anotado en
+ *   control_captura_api.api_id_factura_sel y el SP lo respeta (ver
+ *   sql/cambios_2026_08_factura_seleccionada.sql). Así no hay que modificar el
+ *   servicio externo.
  */
 const axios = require('axios');
 const { query, execute } = require('../database/db');
@@ -95,6 +101,63 @@ function requerirNumero(valor, campo) {
 }
 
 /**
+ * Deja anotada en el despacho la factura que el usuario eligió, para que el SP
+ * cobre contra ESA y no contra la que él escogería por su cuenta.
+ *
+ * Se valida aquí y no solo en el SP para poder dar un mensaje entendible antes
+ * de mandar nada al servicio externo.
+ */
+async function anotarFacturaElegida({ api_id: apiId, id_factura_vale: idFactura,
+  id_producto: idProducto, id_bomba: idBomba }) {
+  const [factura] = await query(
+    `SELECT codigo, factura, saldo, estado
+       FROM man_facturas_vales
+      WHERE codigo = ? AND id_producto = ? AND id_bomba = ?`,
+    [idFactura, idProducto, idBomba]
+  );
+  if (!factura) {
+    const e = new Error('La factura seleccionada no corresponde al producto y a la bomba del despacho.');
+    e.status = 400;
+    throw e;
+  }
+  if (String(factura.estado).toUpperCase() !== 'ACTIVO') {
+    const e = new Error(`La factura ${factura.factura} no está activa (estado: ${factura.estado}).`);
+    e.status = 409;
+    throw e;
+  }
+
+  // Si la columna todavía no existe (cambio de base sin aplicar), el despacho
+  // igual se confirma: solo que el SP elegirá la factura como antes, y de eso
+  // avisa `aviso_factura` al terminar.
+  try {
+    await execute(
+      'UPDATE control_captura_api SET api_id_factura_sel = ? WHERE api_id = ?',
+      [idFactura, apiId]
+    );
+  } catch (e) {
+    if (e.code !== 'ER_BAD_FIELD_ERROR') throw e;
+  }
+}
+
+/** Facturas contra las que quedó cobrado un despacho ya confirmado. */
+async function facturasCobradas(apiId) {
+  const filas = await query(
+    `SELECT d.id_factura_vale AS codigo, f.factura, d.cantidad, d.total
+       FROM pro_detalle_facturas d
+       LEFT JOIN man_facturas_vales f ON f.codigo = d.id_factura_vale
+      WHERE d.id_api_origen = ?
+      ORDER BY d.correlativo`,
+    [apiId]
+  ).catch(() => []);
+  return {
+    facturas: filas,
+    // Con cruce de facturas son dos: basta que la elegida sea una de ellas.
+    coincide: (idFactura) => filas.length > 0
+      && filas.some((f) => Number(f.codigo) === Number(idFactura)),
+  };
+}
+
+/**
  * confirmar
  * Ejecuta sp_confirmar_despacho_api (el SP oficial del servidor) con los datos
  * seleccionados en pantalla. Firma real del SP (8 IN + 4 OUT):
@@ -115,15 +178,34 @@ async function confirmar(data, usuario) {
     id_bomba: requerirNumero(data.id_bomba, 'id_bomba'),
     id_poliza: requerirNumero(data.id_poliza, 'id_poliza'),
     usuario: usuario || 'sistema',
+    // Se manda también por si el servicio externo llega a usarlo algún día; hoy
+    // lo que manda es lo que se anota en control_captura_api (abajo).
+    id_factura_vale: requerirNumero(data.id_factura_vale, 'id_factura_vale'),
   };
+
+  // La factura elegida se anota ANTES de confirmar: el SP la lee de ahí. Se
+  // valida contra el producto y la bomba del despacho para no cobrarle a una
+  // factura que no corresponde.
+  await anotarFacturaElegida(payload);
 
   try {
     const resp = await axios.post(CONFIRM_EXTERNAL_URL, payload, {
       headers: { 'Content-Type': 'application/json' },
       timeout: 20000,
     });
-    // El externo hace SP + saldo + marca 'C' + PDF + correo. Devolvemos su respuesta.
-    return resp.data;
+    // El externo hace SP + saldo + marca 'C' + PDF + correo. Se comprueba contra
+    // qué factura quedó cobrado y se avisa si no fue la elegida, en vez de que
+    // el vale salga impreso con otro número sin que nadie se entere.
+    const cobro = await facturasCobradas(payload.api_id);
+    return {
+      ...resp.data,
+      facturas_cobradas: cobro.facturas,
+      factura_coincide: cobro.coincide(payload.id_factura_vale),
+      aviso_factura: cobro.coincide(payload.id_factura_vale) ? null
+        : `El vale quedó cobrado a ${cobro.facturas.map((f) => f.factura).join(' y ')}, `
+          + 'no a la factura seleccionada. Revise que el cambio de base de datos '
+          + '(cambios_2026_08_factura_seleccionada.sql) esté aplicado.',
+    };
   } catch (e) {
     const msg =
       e.response?.data?.mensaje ||
