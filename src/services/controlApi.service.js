@@ -89,6 +89,23 @@ async function asignarUbicacion(apiId, idUbic) {
   return row;
 }
 
+/** Igual que requerirNumero pero admite que no venga: devuelve null. */
+function opcionalNumero(valor) {
+  if (valor === undefined || valor === null || valor === '') return null;
+  const n = Number(valor);
+  return Number.isNaN(n) ? null : n;
+}
+
+/** Borra la factura anotada en un despacho (no hay selección para este intento). */
+async function limpiarFacturaElegida(apiId) {
+  try {
+    await execute('UPDATE control_captura_api SET api_id_factura_sel = NULL WHERE api_id = ?', [apiId]);
+  } catch (e) {
+    // Si el cambio de base todavía no está aplicado, no hay nada que limpiar.
+    if (e.code !== 'ER_BAD_FIELD_ERROR') throw e;
+  }
+}
+
 /** Valida que un valor sea un entero/numero positivo; lanza Error 400 si no. */
 function requerirNumero(valor, campo) {
   const n = Number(valor);
@@ -178,15 +195,21 @@ async function confirmar(data, usuario) {
     id_bomba: requerirNumero(data.id_bomba, 'id_bomba'),
     id_poliza: requerirNumero(data.id_poliza, 'id_poliza'),
     usuario: usuario || 'sistema',
-    // Se manda también por si el servicio externo llega a usarlo algún día; hoy
-    // lo que manda es lo que se anota en control_captura_api (abajo).
-    id_factura_vale: requerirNumero(data.id_factura_vale, 'id_factura_vale'),
   };
 
-  // La factura elegida se anota ANTES de confirmar: el SP la lee de ahí. Se
-  // valida contra el producto y la bomba del despacho para no cobrarle a una
-  // factura que no corresponde.
-  await anotarFacturaElegida(payload);
+  // La factura elegida es OPCIONAL a propósito: si se exigiera, una pantalla que
+  // todavía no la mande (un build anterior al despliegue) dejaría de confirmar.
+  // Cuando viene, se anota ANTES de confirmar porque el SP la lee de ahí, y se
+  // manda también en el cuerpo por si el servicio externo llega a usarla.
+  const idFactura = opcionalNumero(data.id_factura_vale);
+  if (idFactura !== null) {
+    payload.id_factura_vale = idFactura;
+    await anotarFacturaElegida({ ...payload, id_factura_vale: idFactura });
+  } else {
+    // Sin selección se limpia la anotación previa, para que un reintento no
+    // arrastre la factura de un intento anterior.
+    await limpiarFacturaElegida(payload.api_id);
+  }
 
   try {
     const resp = await axios.post(CONFIRM_EXTERNAL_URL, payload, {
@@ -197,14 +220,17 @@ async function confirmar(data, usuario) {
     // qué factura quedó cobrado y se avisa si no fue la elegida, en vez de que
     // el vale salga impreso con otro número sin que nadie se entere.
     const cobro = await facturasCobradas(payload.api_id);
+    // Solo se puede hablar de coincidencia si hubo una factura elegida.
+    const coincide = idFactura === null ? null : cobro.coincide(idFactura);
     return {
       ...resp.data,
       facturas_cobradas: cobro.facturas,
-      factura_coincide: cobro.coincide(payload.id_factura_vale),
-      aviso_factura: cobro.coincide(payload.id_factura_vale) ? null
-        : `El vale quedó cobrado a ${cobro.facturas.map((f) => f.factura).join(' y ')}, `
-          + 'no a la factura seleccionada. Revise que el cambio de base de datos '
-          + '(cambios_2026_08_factura_seleccionada.sql) esté aplicado.',
+      factura_coincide: coincide,
+      aviso_factura: coincide === false
+        ? `El vale quedó cobrado a ${cobro.facturas.map((f) => f.factura).join(' y ') || 'otra factura'}, `
+          + 'no a la seleccionada. Verifique que el cambio de base de datos '
+          + '(cambios_2026_08_factura_seleccionada.sql) esté aplicado.'
+        : null,
     };
   } catch (e) {
     const msg =
