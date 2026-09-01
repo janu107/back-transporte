@@ -148,6 +148,31 @@ async function validarFacturaElegida({ id_factura_vale: idFactura,
   return factura;
 }
 
+/**
+ * Traduce el error de MySQL cuando el CALL no coincide con la firma del
+ * procedimiento. El texto original ("Incorrect number of arguments ... expected
+ * 13, got 12") no le dice nada a quien está capturando, y el arreglo no está en
+ * esta pantalla sino en el servicio que ejecuta el CALL.
+ *
+ * La cuenta: 13 = 9 parámetros de entrada + 4 de salida. Si llegan 12, el
+ * llamador va con 8 de entrada, o sea sin la factura elegida.
+ */
+function explicarDesajuste(mensaje) {
+  const m = /Incorrect number of arguments.*sp_confirmar_despacho_api.*expected (\d+).*got (\d+)/i
+    .exec(String(mensaje || ''));
+  if (!m) return null;
+  const esperados = Number(m[1]);
+  const recibidos = Number(m[2]);
+  return recibidos < esperados
+    ? 'El servicio de confirmación todavía no le envía la factura seleccionada al '
+      + 'procedimiento: lo llama con un parámetro de menos. Hay que actualizar '
+      + 'combustible-api para que pase id_factura_vale como parámetro 8 del CALL. '
+      + `(El procedimiento espera ${esperados} argumentos y recibió ${recibidos}.)`
+    : 'El servicio de confirmación envía un parámetro de más al procedimiento: la '
+      + 'versión del procedimiento en la base es anterior a la del servicio. '
+      + `(Espera ${esperados} argumentos y recibió ${recibidos}.)`;
+}
+
 /** Facturas contra las que quedó cobrado un despacho ya confirmado. */
 async function facturasCobradas(apiId) {
   const filas = await query(
@@ -217,13 +242,15 @@ async function confirmar(data, usuario) {
           + 'pasando la factura al procedimiento (parámetro 8).',
     };
   } catch (e) {
-    const msg =
+    const original =
       e.response?.data?.mensaje ||
       e.response?.data?.message ||
       (e.code === 'ECONNREFUSED' || e.code === 'ECONNABORTED'
         ? `No se pudo contactar el servicio de confirmación (${CONFIRM_EXTERNAL_URL}).`
         : e.message) ||
       'No se pudo confirmar el despacho.';
+    // Los desajustes de firma se explican en claro; el resto pasa tal cual.
+    const msg = explicarDesajuste(original) || original;
     const err = new Error(msg);
     err.status = e.response?.status || 502;
     throw err;
