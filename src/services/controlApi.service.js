@@ -9,11 +9,13 @@
  *   como 'C', genera el PDF y envía el correo (Brevo). Nuestro backend YA NO ejecuta
  *   el SP directamente para evitar doble confirmación.
  *
- *   La FACTURA contra la que se cobra la elige el usuario en pantalla. Como el
- *   servicio externo no recibe ese dato, se deja anotado en
- *   control_captura_api.api_id_factura_sel y el SP lo respeta (ver
- *   sql/cambios_2026_08_factura_seleccionada.sql). Así no hay que modificar el
- *   servicio externo.
+ *   La FACTURA contra la que se cobra la elige el usuario en pantalla y viaja en
+ *   el cuerpo como id_factura_vale. El procedimiento la recibe como su parámetro
+ *   8 (p_id_factura_vale); quien ejecuta el CALL es el servicio externo, así que
+ *   aquí se valida y se reenvía. Ver sql/revisar_sp_confirmar_despacho.sql.
+ *
+ *   Es OBLIGATORIA: el procedimiento ya no admite que falte, y avisarlo aquí da
+ *   un mensaje entendible en vez de dejar que falle el CALL.
  */
 const axios = require('axios');
 const { query, execute } = require('../database/db');
@@ -89,21 +91,19 @@ async function asignarUbicacion(apiId, idUbic) {
   return row;
 }
 
-/** Igual que requerirNumero pero admite que no venga: devuelve null. */
-function opcionalNumero(valor) {
-  if (valor === undefined || valor === null || valor === '') return null;
+/**
+ * La factura elegida en el desplegable. Se pide con un mensaje propio porque es
+ * la selección del usuario, no un dato técnico: "El campo id_factura_vale..." no
+ * le dice nada a quien está capturando.
+ */
+function requerirFactura(valor) {
   const n = Number(valor);
-  return Number.isNaN(n) ? null : n;
-}
-
-/** Borra la factura anotada en un despacho (no hay selección para este intento). */
-async function limpiarFacturaElegida(apiId) {
-  try {
-    await execute('UPDATE control_captura_api SET api_id_factura_sel = NULL WHERE api_id = ?', [apiId]);
-  } catch (e) {
-    // Si el cambio de base todavía no está aplicado, no hay nada que limpiar.
-    if (e.code !== 'ER_BAD_FIELD_ERROR') throw e;
+  if (valor === undefined || valor === null || valor === '' || Number.isNaN(n)) {
+    const e = new Error('Seleccione la factura contra la que se cobra el despacho.');
+    e.status = 400;
+    throw e;
   }
+  return n;
 }
 
 /** Valida que un valor sea un entero/numero positivo; lanza Error 400 si no. */
@@ -118,13 +118,12 @@ function requerirNumero(valor, campo) {
 }
 
 /**
- * Deja anotada en el despacho la factura que el usuario eligió, para que el SP
- * cobre contra ESA y no contra la que él escogería por su cuenta.
- *
- * Se valida aquí y no solo en el SP para poder dar un mensaje entendible antes
- * de mandar nada al servicio externo.
+ * Comprueba que la factura elegida siga sirviendo para este despacho: que exista,
+ * que esté activa y que sea del mismo producto y bomba. El procedimiento también
+ * lo valida, pero aquí el mensaje se puede escribir en claro y se evita mandar
+ * una confirmación destinada a fallar.
  */
-async function anotarFacturaElegida({ api_id: apiId, id_factura_vale: idFactura,
+async function validarFacturaElegida({ id_factura_vale: idFactura,
   id_producto: idProducto, id_bomba: idBomba }) {
   const [factura] = await query(
     `SELECT codigo, factura, saldo, estado
@@ -133,8 +132,12 @@ async function anotarFacturaElegida({ api_id: apiId, id_factura_vale: idFactura,
     [idFactura, idProducto, idBomba]
   );
   if (!factura) {
-    const e = new Error('La factura seleccionada no corresponde al producto y a la bomba del despacho.');
+    // Mismo caso que el error nuevo del procedimiento: la pantalla debe recargar
+    // el desplegable y pedir que se vuelva a elegir.
+    const e = new Error('La factura seleccionada no existe, no está activa o no corresponde '
+      + 'a la bomba y el producto de este despacho. Vuelva a elegirla.');
     e.status = 400;
+    e.recargarFacturas = true;
     throw e;
   }
   if (String(factura.estado).toUpperCase() !== 'ACTIVO') {
@@ -142,18 +145,7 @@ async function anotarFacturaElegida({ api_id: apiId, id_factura_vale: idFactura,
     e.status = 409;
     throw e;
   }
-
-  // Si la columna todavía no existe (cambio de base sin aplicar), el despacho
-  // igual se confirma: solo que el SP elegirá la factura como antes, y de eso
-  // avisa `aviso_factura` al terminar.
-  try {
-    await execute(
-      'UPDATE control_captura_api SET api_id_factura_sel = ? WHERE api_id = ?',
-      [idFactura, apiId]
-    );
-  } catch (e) {
-    if (e.code !== 'ER_BAD_FIELD_ERROR') throw e;
-  }
+  return factura;
 }
 
 /** Facturas contra las que quedó cobrado un despacho ya confirmado. */
@@ -194,22 +186,14 @@ async function confirmar(data, usuario) {
     id_producto: requerirNumero(data.id_producto, 'id_producto'),
     id_bomba: requerirNumero(data.id_bomba, 'id_bomba'),
     id_poliza: requerirNumero(data.id_poliza, 'id_poliza'),
+    // Parámetro 8 del procedimiento: la factura elegida en el desplegable.
+    id_factura_vale: requerirFactura(data.id_factura_vale),
     usuario: usuario || 'sistema',
   };
 
-  // La factura elegida es OPCIONAL a propósito: si se exigiera, una pantalla que
-  // todavía no la mande (un build anterior al despliegue) dejaría de confirmar.
-  // Cuando viene, se anota ANTES de confirmar porque el SP la lee de ahí, y se
-  // manda también en el cuerpo por si el servicio externo llega a usarla.
-  const idFactura = opcionalNumero(data.id_factura_vale);
-  if (idFactura !== null) {
-    payload.id_factura_vale = idFactura;
-    await anotarFacturaElegida({ ...payload, id_factura_vale: idFactura });
-  } else {
-    // Sin selección se limpia la anotación previa, para que un reintento no
-    // arrastre la factura de un intento anterior.
-    await limpiarFacturaElegida(payload.api_id);
-  }
+  // Se revisa aquí antes de mandar nada: así el aviso es claro en vez del error
+  // que devolvería el procedimiento.
+  await validarFacturaElegida(payload);
 
   try {
     const resp = await axios.post(CONFIRM_EXTERNAL_URL, payload, {
@@ -219,18 +203,18 @@ async function confirmar(data, usuario) {
     // El externo hace SP + saldo + marca 'C' + PDF + correo. Se comprueba contra
     // qué factura quedó cobrado y se avisa si no fue la elegida, en vez de que
     // el vale salga impreso con otro número sin que nadie se entere.
+    // Se comprueba contra qué factura quedó cobrado: si no fue la elegida, hay
+    // que decirlo, porque el vale se imprime con la factura real.
     const cobro = await facturasCobradas(payload.api_id);
-    // Solo se puede hablar de coincidencia si hubo una factura elegida.
-    const coincide = idFactura === null ? null : cobro.coincide(idFactura);
+    const coincide = cobro.coincide(payload.id_factura_vale);
     return {
       ...resp.data,
       facturas_cobradas: cobro.facturas,
       factura_coincide: coincide,
-      aviso_factura: coincide === false
-        ? `El vale quedó cobrado a ${cobro.facturas.map((f) => f.factura).join(' y ') || 'otra factura'}, `
-          + 'no a la seleccionada. Verifique que el cambio de base de datos '
-          + '(cambios_2026_08_factura_seleccionada.sql) esté aplicado.'
-        : null,
+      aviso_factura: coincide ? null
+        : `El vale quedó cobrado a ${cobro.facturas.map((f) => f.factura).join(' y ') || 'otra factura'}, `
+          + 'no a la seleccionada. Revise que el servicio de confirmación esté '
+          + 'pasando la factura al procedimiento (parámetro 8).',
     };
   } catch (e) {
     const msg =

@@ -3,7 +3,7 @@
  * Controlador del módulo CONTROL DEL API (Confirmación de Vales).
  */
 const service = require('../services/controlApi.service');
-const { success } = require('../utils/response');
+const { success, error } = require('../utils/response');
 
 const userOf = (req) => (req.user && req.user.usuario) || 'sistema';
 
@@ -33,7 +33,13 @@ module.exports = {
       const resultado = await service.confirmar(req.body, userOf(req));
       success(res, resultado, resultado.mensaje);
     } catch (e) {
-      next(e);
+      // Cuando la factura elegida ya no sirve (otro usuario la liquidó justo
+      // antes), se le dice a la pantalla que recargue el desplegable y pida
+      // elegir de nuevo, en vez de solo mostrar el error.
+      if (e.recargarFacturas) {
+        return error(res, e.message, e.status || 400, { recargar_facturas: true });
+      }
+      return next(e);
     }
   },
 };
