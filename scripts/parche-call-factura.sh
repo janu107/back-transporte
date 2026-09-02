@@ -73,11 +73,22 @@ for F in $ARCHIVOS; do
   echo "=== 2. $F ==="
 
   ANTES=$(contar_marcas "$F")
-  if [ "$ANTES" -ge 9 ]; then
-    echo "  El CALL ya lleva $ANTES interrogaciones. Se deja como está."
+  FALTA_DECL=0
+  if [ "$(usa_prefijo "$F")" != "1" ] && [ "$(declarada_antes "$F")" != "1" ]; then
+    FALTA_DECL=1
+  fi
+
+  # Un intento anterior pudo dejar el CALL con sus 9 interrogaciones pero sin
+  # declarar la variable. En ese caso hay que completar, no saltarse el archivo.
+  if [ "$ANTES" -ge 9 ] && [ "$FALTA_DECL" -eq 0 ]; then
+    echo "  Ya está completo: 9 interrogaciones y la variable disponible."
     continue
   fi
-  echo "  Interrogaciones actuales: $ANTES"
+  if [ "$ANTES" -ge 9 ]; then
+    echo "  El CALL ya tiene 9 interrogaciones, pero FALTA declarar la variable."
+  else
+    echo "  Interrogaciones actuales: $ANTES"
+  fi
 
   RESPALDO="$F.bak-$(date +%F-%H%M%S)"
   cp "$F" "$RESPALDO"
@@ -86,13 +97,13 @@ for F in $ARCHIVOS; do
   echo "  --- ANTES ---"
   grep -n -B 2 -A 10 "CALL sp_confirmar_despacho_api" "$F" | sed 's/^/    /'
 
-  # (a) Una interrogación más dentro del CALL.
-  perl -0777 -i -pe 's/(CALL\s+sp_confirmar_despacho_api\s*\(\s*)((?:\?\s*,\s*){7}\?)(\s*,)/${1}${2}, ?${3}/s' "$F"
+  # (a) Una interrogación más dentro del CALL. Solo si aún faltan.
+  [ "$ANTES" -lt 9 ] && perl -0777 -i -pe 's/(CALL\s+sp_confirmar_despacho_api\s*\(\s*)((?:\?\s*,\s*){7}\?)(\s*,)/${1}${2}, ?${3}/s' "$F"
 
   # (b) La factura entre id_poliza y usuario, conservando el prefijo (p., data.).
   #     Global a propósito: así toca la lista de valores del CALL y también la
   #     lectura del cuerpo de la petición, si tiene esa misma forma.
-  perl -0777 -i -pe 's/(([\w\$.]*)id_poliza\s*,\s*)([\w\$.]*usuario)/${1}${2}id_factura_vale, ${3}/gs' "$F"
+  [ "$(valor_en_llamada "$F")" != "1" ] && perl -0777 -i -pe 's/(([\w\$.]*)id_poliza\s*,\s*)([\w\$.]*usuario)/${1}${2}id_factura_vale, ${3}/gs' "$F"
 
   # (c) Si tras (b) la variable sigue sin estar disponible antes del CALL, se
   #     agrega después de `usuario` en la lectura del cuerpo. Se pone DESPUÉS
