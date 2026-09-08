@@ -78,8 +78,16 @@ function pick(def, data) {
   return out;
 }
 
-/** Lista todos los registros, ordenados por PK descendente. */
+/**
+ * Lista todos los registros, ordenados por PK descendente.
+ *
+ * Un recurso puede traer su propia consulta en `listSql` cuando el listado
+ * necesita datos calculados que no son columnas de la tabla (por ejemplo los
+ * galones ya despachados de una factura). Sigue devolviendo todas las columnas,
+ * así que el formulario y la edición no cambian.
+ */
 async function list(def) {
+  if (def.listSql) return query(def.listSql);
   return query(`SELECT * FROM \`${def.table}\` ORDER BY \`${def.pk}\` DESC`);
 }
 

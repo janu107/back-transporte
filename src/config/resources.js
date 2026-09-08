@@ -49,6 +49,27 @@ const RESOURCES = {
     table: 'man_facturas_vales', pk: 'codigo',
     columns: ['factura', 'id_producto', 'id_bomba', 'descripcion_compra', 'fecha', 'unidades', 'precio', 'saldo', 'estado'],
     hasEstado: true,
+    // El SALDO son UNIDADES (galones) por despachar, no un monto. Se acompaña de
+    // los galones YA DESPACHADOS y del saldo que resulta de la cuenta, para que
+    // la pantalla pueda avisar cuando el guardado no cuadre.
+    //
+    //   despachado     = SUM(cantidad) de los vales ACTIVOS de esa factura
+    //   saldo_calculado = unidades − despachado
+    //
+    // Solo cuentan los vales en estado ACTIVO: un vale anulado devuelve su
+    // galonaje, así que no debe descontar.
+    listSql: `
+      SELECT f.*,
+             COALESCE(d.despachado, 0) AS despachado,
+             ROUND(f.unidades - COALESCE(d.despachado, 0), 2) AS saldo_calculado
+        FROM man_facturas_vales f
+        LEFT JOIN (
+              SELECT id_factura_vale, SUM(cantidad) AS despachado
+                FROM pro_detalle_facturas
+               WHERE estado = 'ACTIVO'
+               GROUP BY id_factura_vale
+             ) d ON d.id_factura_vale = f.codigo
+       ORDER BY f.codigo DESC`,
   },
 
   // ---- Procesos (URL: /procesos/:recurso) ----

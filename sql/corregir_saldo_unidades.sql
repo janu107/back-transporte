@@ -12,15 +12,47 @@
 --   La pantalla ya quedó corregida (saldo = unidades al crear). Este archivo
 --   arregla las filas VIEJAS.
 --
--- EL SALDO CORRECTO
---   saldo = unidades - (galones ya despachados con vales NO anulados)
+-- LA CUENTA (la del área, tal cual)
+--   despachados:
+--     SELECT SUM(cantidad) FROM pro_detalle_facturas
+--      WHERE id_factura_vale = ? AND estado = 'ACTIVO';
+--   saldo:
+--     SELECT unidades, saldo, (unidades - <despachados>) AS saldo1
+--       FROM man_facturas_vales WHERE factura = ?;
 --
--- ORDEN DE USO: 1) el paso 1 para ver. 2) el paso 2 para respaldar.
---               3) el paso 3 para corregir. 4) el paso 1 otra vez para revisar.
+--   O sea:  saldo = unidades − SUM(cantidad de los vales ACTIVOS)
+--   Solo ACTIVO: un vale anulado devuelve su galonaje y no debe descontar.
+--
+-- ORDEN DE USO: paso 0 y paso 1 para ver · paso 2 respalda · paso 3 corrige ·
+--               paso 1 otra vez para revisar.
 -- ---------------------------------------------------------------------
 
 -- =====================================================================
--- PASO 1 · VER (no cambia nada). Compara el saldo guardado con el correcto.
+-- PASO 0 · ANTES DE TOCAR NADA: ¿qué estados hay en los vales?
+--
+--   La cuenta de arriba solo suma los ACTIVO. Si aquí saliera algún estado
+--   distinto de ACTIVO / ANULADO / ANULADA — sobre todo NULL, o filas del API
+--   (id_api_origen) grabadas por el procedimiento con otro valor —, esos
+--   despachos NO se restarían y el saldo quedaría de MÁS.
+--
+--   Si esta consulta solo muestra ACTIVO y ANULADO, siga tranquilo.
+--   Si muestra otra cosa, avise antes de aplicar el paso 3.
+--
+--   (Si el servidor no tuviera la columna id_api_origen, borre esa línea de la
+--    consulta: el resto funciona igual.)
+-- =====================================================================
+SELECT COALESCE(estado, '(NULL)')            AS estado,
+       COUNT(*)                              AS vales,
+       SUM(cantidad)                         AS galones,
+       SUM(id_api_origen IS NOT NULL)        AS vienen_del_api,
+       MIN(fecha)                            AS primero,
+       MAX(fecha)                            AS ultimo
+  FROM pro_detalle_facturas
+ GROUP BY COALESCE(estado, '(NULL)')
+ ORDER BY vales DESC;
+
+-- =====================================================================
+-- PASO 1 · VER (no cambia nada). Compara el saldo guardado con el de la cuenta.
 -- =====================================================================
 SELECT f.codigo, f.factura, f.estado,
        f.unidades                       AS compradas_gal,
@@ -32,12 +64,13 @@ SELECT f.codigo, f.factura, f.estado,
        -- Si el saldo guardado se parece a unidades × precio, viene del error.
        CASE WHEN ABS(f.saldo - (f.unidades * f.precio)) < 1 THEN 'ERA UN MONTO'
             WHEN ABS(f.saldo - (f.unidades - COALESCE(d.despachado, 0))) < 0.01 THEN 'ya está bien'
+            WHEN COALESCE(d.despachado, 0) > f.unidades THEN 'DESPACHADO DE MAS: revisar a mano'
             ELSE 'revisar a mano' END   AS diagnostico
   FROM man_facturas_vales f
   LEFT JOIN (
         SELECT id_factura_vale, SUM(cantidad) AS despachado
           FROM pro_detalle_facturas
-         WHERE UPPER(COALESCE(estado, 'ACTIVO')) NOT IN ('ANULADO', 'ANULADA')
+         WHERE estado = 'ACTIVO'
          GROUP BY id_factura_vale
        ) d ON d.id_factura_vale = f.codigo
  ORDER BY ABS(f.saldo - (f.unidades - COALESCE(d.despachado, 0))) DESC;
@@ -58,14 +91,14 @@ CREATE TABLE respaldo_saldo_facturas_2026_09 AS
 -- =====================================================================
 -- PASO 3 · CORREGIR. Deja el saldo en galones por despachar.
 --   Solo toca las facturas que NO están ya correctas, y nunca deja negativo:
---   si se despachó más de lo comprado el saldo queda en 0 y sale en el paso 1
---   como 'revisar a mano'.
+--   si se despachó más de lo comprado el saldo queda en 0 y esa factura sale
+--   en el paso 1 como 'DESPACHADO DE MAS: revisar a mano'.
 -- =====================================================================
 UPDATE man_facturas_vales f
   LEFT JOIN (
         SELECT id_factura_vale, SUM(cantidad) AS despachado
           FROM pro_detalle_facturas
-         WHERE UPPER(COALESCE(estado, 'ACTIVO')) NOT IN ('ANULADO', 'ANULADA')
+         WHERE estado = 'ACTIVO'
          GROUP BY id_factura_vale
        ) d ON d.id_factura_vale = f.codigo
    SET f.saldo = GREATEST(f.unidades - COALESCE(d.despachado, 0), 0)
