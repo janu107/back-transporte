@@ -5,8 +5,9 @@
  *    peso en quintales, flete, anticipos, diesel, aceite y el saldo a pagar.
  *
  * 2) resumenPolizasTransportistas(): matriz de transportistas (filas) contra
- *    pólizas activas (columnas) con el valor de los viajes activos de cada
- *    cruce, más totales por fila, por póliza y general.
+ *    pólizas activas (columnas) con el SALDO de cada cruce, más totales por
+ *    fila, por póliza y general. Es el mismo saldo del reporte (1), así que los
+ *    dos reportes cuadran celda por celda.
  *
  * Decisiones:
  *   - "Póliza activa" = estado ABIERTA. Las liquidadas y anuladas quedan fuera.
@@ -185,8 +186,15 @@ async function porTransportista(q = {}) {
 }
 
 /**
- * RESUMEN DE PÓLIZAS ACTIVAS POR TRANSPORTISTA — matriz transportista × póliza
- * con el valor de los viajes activos de cada cruce.
+ * RESUMEN DE PÓLIZAS ACTIVAS POR TRANSPORTISTA — matriz transportista × póliza.
+ *
+ * Cada celda es el SALDO del cruce, no el flete: flete − anticipos − diesel −
+ * aceite, con la misma cuenta que la columna SALDO del reporte por transportista.
+ * Antes se mostraba solo SUM(v.valor) (el flete), y por eso los dos reportes no
+ * coincidían: la matriz decía 144,980.29 donde el detalle decía 79,154.48.
+ *
+ * El desglose de cada celda viaja aparte (`detalles`) para poder consultarlo sin
+ * abrir el otro reporte.
  */
 async function resumenPolizasTransportistas() {
   const polizas = await query(
@@ -212,33 +220,86 @@ async function resumenPolizasTransportistas() {
       GROUP BY ${transpViaje}, v.id_poliza`
   );
 
+  // ---- Los tres descuentos, por cruce transportista × póliza ----
+  // Los anticipos guardan el transportista directamente; si el esquema no tuviera
+  // la columna no hay forma de atribuirlos y se muestran en cero.
+  let anticipos = [];
+  if (await existeColumna('pro_anticipo_provision', 'id_transportista')) {
+    const activoAnt = await sqlActivo('pro_anticipo_provision', 'a');
+    anticipos = await query(
+      `SELECT a.id_transportista, a.id_poliza, COALESCE(SUM(a.valor), 0) AS valor
+         FROM pro_anticipo_provision a
+         JOIN man_poliza p ON p.codigo = a.id_poliza
+        WHERE ${POLIZA_ABIERTA} AND ${activoAnt}
+        GROUP BY a.id_transportista, a.id_poliza`
+    );
+  }
+
+  const transpVale = await sqlTransportistaDe('pro_detalle_facturas', 'd', 'cam');
+  const activoVale = await sqlActivo('pro_detalle_facturas', 'd');
+  const diesel = await query(
+    `SELECT ${transpVale} AS id_transportista, d.id_poliza,
+            COALESCE(SUM(d.total), 0) AS valor
+       FROM pro_detalle_facturas d
+       LEFT JOIN man_camion cam ON cam.codigo = d.id_camion
+       JOIN man_poliza p ON p.codigo = d.id_poliza
+      WHERE ${POLIZA_ABIERTA} AND ${activoVale}
+      GROUP BY ${transpVale}, d.id_poliza`
+  );
+
+  const aceite = await aceitePorPoliza();
+
   const nombresT = await query(
     'SELECT codigo, nit, nombre_comercial FROM man_transportista'
   );
   const porCodigo = new Map(nombresT.map((t) => [Number(t.codigo), t]));
 
   const porTransp = new Map();
-  cruces.forEach((r) => {
-    const id = r.id_transportista == null ? 0 : Number(r.id_transportista);
+  const fila = (idCrudo) => {
+    const id = idCrudo == null ? 0 : Number(idCrudo);
     if (!porTransp.has(id)) {
       const t = porCodigo.get(id);
       porTransp.set(id, {
         id_transportista: id || null,
         nit: t?.nit || '',
         nombre: t?.nombre_comercial || 'Sin transportista asignado',
-        valores: {}, viajes: 0, total: 0,
+        valores: {}, detalles: {}, viajes: 0, total: 0,
       });
     }
-    const f = porTransp.get(id);
-    f.valores[r.id_poliza] = money(r.valor);
-    f.viajes += Number(r.viajes || 0);
+    return porTransp.get(id);
+  };
+  /** Celda del cruce. Se crea aunque solo tenga descuentos: ese saldo negativo
+   *  también se le debe cobrar, y ocultarlo era perderlo de vista. */
+  const celda = (f, idPoliza) => {
+    if (!f.detalles[idPoliza]) {
+      f.detalles[idPoliza] = { flete: 0, anticipo: 0, diesel: 0, aceite: 0, viajes: 0 };
+    }
+    return f.detalles[idPoliza];
+  };
+
+  cruces.forEach((r) => {
+    const f = fila(r.id_transportista);
+    const c = celda(f, r.id_poliza);
+    c.flete = money(r.valor);
+    c.viajes = Number(r.viajes || 0);
+    f.viajes += c.viajes;
   });
+  anticipos.forEach((r) => { celda(fila(r.id_transportista), r.id_poliza).anticipo = money(r.valor); });
+  diesel.forEach((r) => { celda(fila(r.id_transportista), r.id_poliza).diesel = money(r.valor); });
+  aceite.forEach((r) => { celda(fila(r.id_transportista), r.id_poliza).aceite = money(r.valor); });
 
   const filas = [...porTransp.values()]
-    .map((f) => ({
-      ...f,
-      total: money(Object.values(f.valores).reduce((s, v) => s + v, 0)),
-    }))
+    .map((f) => {
+      const valores = {};
+      Object.entries(f.detalles).forEach(([idPoliza, c]) => {
+        valores[idPoliza] = money(c.flete - c.anticipo - c.diesel - c.aceite);
+      });
+      return {
+        ...f,
+        valores,
+        total: money(Object.values(valores).reduce((s, v) => s + v, 0)),
+      };
+    })
     .sort((a, b) => String(a.nombre).localeCompare(String(b.nombre)));
 
   const totalesPorPoliza = {};

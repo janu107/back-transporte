@@ -62,7 +62,10 @@ async function validar(data, runner = query) {
   const cantidad = money(data.cantidad);
   if (cantidad <= 0) throw errorNegocio('La cantidad debe ser mayor que cero.', 400);
   if (cantidad > Number(factura.saldo)) {
-    throw errorNegocio(`La cantidad (${cantidad}) supera el saldo de la factura (${money(factura.saldo)}).`);
+    // El saldo son GALONES por despachar, no quetzales: se nombra la unidad para
+    // que el mensaje no se lea como un monto.
+    throw errorNegocio(`La cantidad (${cantidad} gal) supera el saldo de la factura `
+      + `(${money(factura.saldo)} gal por despachar).`);
   }
   const total = money(cantidad * Number(factura.precio || 0));
 
