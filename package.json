@@ -9,6 +9,7 @@
     "dev": "nodemon server.js",
     "setup:db": "node scripts/setup-db.js",
     "setup:control-api": "node scripts/setup-db.js control_captura_api.sql",
+    "setup:saldo-no-negativo": "node scripts/setup-db.js evitar_saldo_negativo_confirmacion.sql",
     "init:admin": "node scripts/init-admin.js"
   },
   "keywords": [

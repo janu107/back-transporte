@@ -149,6 +149,31 @@ async function validarFacturaElegida({ id_factura_vale: idFactura,
 }
 
 /**
+ * La comprobación visual es solo una ayuda. Esta validación en el servidor evita
+ * que un cliente desactualizado confirme un vale mayor que el saldo mostrado.
+ * El procedimiento SQL aplica la misma regla de forma transaccional para cubrir
+ * confirmaciones simultáneas.
+ */
+async function validarSaldoFactura(idApi, factura) {
+  const [vale] = await query(
+    'SELECT api_cant_galones FROM control_captura_api WHERE api_id = ?',
+    [idApi]
+  );
+  const galones = Number(vale?.api_cant_galones);
+  if (!vale || !Number.isFinite(galones) || galones <= 0) {
+    const e = new Error('No se pudo determinar la cantidad de galones del vale pendiente.');
+    e.status = 400;
+    throw e;
+  }
+  if (galones > Number(factura.saldo)) {
+    const e = new Error(`La factura ${factura.factura} solo tiene ${Number(factura.saldo).toFixed(2)} gal disponibles y el vale requiere ${galones.toFixed(2)} gal. La factura no puede quedar en negativo; registre o seleccione una nueva factura con saldo suficiente.`);
+    e.status = 409;
+    e.recargarFacturas = true;
+    throw e;
+  }
+}
+
+/**
  * Traduce el error de MySQL cuando el CALL no coincide con la firma del
  * procedimiento. El texto original ("Incorrect number of arguments ... expected
  * 13, got 12") no le dice nada a quien está capturando, y el arreglo no está en
@@ -194,9 +219,10 @@ async function facturasCobradas(apiId) {
 /**
  * confirmar
  * Ejecuta sp_confirmar_despacho_api (el SP oficial del servidor) con los datos
- * seleccionados en pantalla. Firma real del SP (8 IN + 4 OUT):
+ * seleccionados en pantalla. Firma real del SP (9 IN + 4 OUT):
  *   (p_api_id, p_id_piloto, p_id_camion, p_id_transportista, p_id_producto,
- *    p_id_bomba, p_id_poliza, p_usuario, OUT det1, det2, hubo_cruce, mensaje)
+ *    p_id_bomba, p_id_poliza, p_id_factura_vale, p_usuario,
+ *    OUT det1, det2, hubo_cruce, mensaje)
  * @param {object} data { api_id, id_piloto, id_camion, id_transportista, id_producto, id_bomba, id_poliza }
  * @param {string} usuario  usuario en sesión
  * @returns {Promise<object>} respuesta del servicio externo (ok, mensaje, correo_enviado, ...)
@@ -218,7 +244,8 @@ async function confirmar(data, usuario) {
 
   // Se revisa aquí antes de mandar nada: así el aviso es claro en vez del error
   // que devolvería el procedimiento.
-  await validarFacturaElegida(payload);
+  const factura = await validarFacturaElegida(payload);
+  await validarSaldoFactura(payload.api_id, factura);
 
   try {
     const resp = await axios.post(CONFIRM_EXTERNAL_URL, payload, {

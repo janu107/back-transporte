@@ -98,7 +98,7 @@ SET FOREIGN_KEY_CHECKS = 1;
 --  PROCEDIMIENTO sp_confirmar_despacho_api  (versión OFICIAL del servidor)
 --
 --  Firma: (p_api_id, p_id_piloto, p_id_camion, p_id_transportista,
---          p_id_producto, p_id_bomba, p_id_poliza, p_usuario,
+--          p_id_producto, p_id_bomba, p_id_poliza, p_id_factura_vale, p_usuario,
 --          OUT p_id_detalle_1, OUT p_id_detalle_2, OUT p_hubo_cruce, OUT p_mensaje)
 --
 --  - Identifica el vale por api_id (PK).
@@ -121,6 +121,7 @@ CREATE PROCEDURE `sp_confirmar_despacho_api`(
     IN  p_id_producto       INT,
     IN  p_id_bomba          INT,
     IN  p_id_poliza         INT,
+    IN  p_id_factura_vale   INT,
     IN  p_usuario           VARCHAR(50),
     OUT p_id_detalle_1      INT,
     OUT p_id_detalle_2      INT,
@@ -188,10 +189,10 @@ BEGIN
     SELECT codigo, saldo, precio, factura
       INTO v_fac_a_codigo, v_fac_a_saldo, v_fac_a_precio, v_fac_a_num_factura
       FROM man_facturas_vales
-     WHERE id_producto = p_id_producto
+     WHERE codigo = p_id_factura_vale
+       AND id_producto = p_id_producto
        AND id_bomba    = p_id_bomba
        AND estado      = 'ACTIVO'
-       AND saldo       < unidades
      ORDER BY saldo ASC, codigo ASC, fecha ASC
      LIMIT 1;
 
