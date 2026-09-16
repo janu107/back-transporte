@@ -53,6 +53,16 @@ router.get('/transportista', authMiddleware, async (req, res, next) => {
   }
 });
 
+// Resumen de liquidacion de UNA poliza, desglosado por transportista.
+router.get('/liquidacion-por-poliza', authMiddleware, async (req, res, next) => {
+  try {
+    success(res, await reporteTransportista.porPoliza(req.query));
+  } catch (e) {
+    if (e.status) return error(res, e.message, e.status);
+    next(e);
+  }
+});
+
 // Matriz de pólizas activas contra los transportistas que trabajan en cada una.
 router.get('/polizas-transportistas', authMiddleware, async (req, res, next) => {
   try {

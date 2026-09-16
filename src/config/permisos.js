@@ -86,6 +86,7 @@ const MODULOS = {
   // Reportes nuevos por transportista: los ve quien registra viajes,
   // quien liquida y quien solo consulta.
   reporteTransportista: ['ADMIN', 'OPERA_VIAJES', 'OPERA_LIQUIDACION', 'CONSULTAS'],
+  liquidacionPorPoliza: ['ADMIN', 'OPERA_VIAJES', 'OPERA_LIQUIDACION', 'CONSULTAS'],
   polizasPorTransportista: ['ADMIN', 'OPERA_VIAJES', 'OPERA_LIQUIDACION', 'CONSULTAS'],
   viajesPorPoliza: TODOS,
   polizasPendientes: TODOS,

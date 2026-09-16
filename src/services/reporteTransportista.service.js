@@ -186,6 +186,104 @@ async function porTransportista(q = {}) {
 }
 
 /**
+ * RESUMEN DE LIQUIDACION POR POLIZA.
+ * Una fila por transportista de la poliza, con la misma cuenta del reporte por
+ * transportista: liquido = flete - anticipo - diesel - manejo. A diferencia de
+ * los reportes de polizas activas, este permite imprimir una poliza ya liquidada.
+ */
+async function porPoliza(q = {}) {
+  const idPoliza = Number(q.id_poliza);
+  if (!idPoliza) throw errorNegocio('Debe indicar la poliza.');
+
+  const poliza = await queryOne(
+    'SELECT codigo, nombre_poliza, estado FROM man_poliza WHERE codigo = ?', [idPoliza]
+  );
+  if (!poliza) throw errorNegocio('La poliza no existe.', 404);
+
+  const transpViaje = await sqlTransportistaDe('pro_poliza_detalle', 'v', 'cam');
+  const activoViaje = await sqlActivo('pro_poliza_detalle', 'v');
+  const viajes = await query(
+    `SELECT ${transpViaje} AS id_transportista, COUNT(*) AS viajes,
+            COALESCE(SUM(v.peso), 0) AS peso_kg, COALESCE(SUM(v.valor), 0) AS flete
+       FROM pro_poliza_detalle v
+       LEFT JOIN man_camion cam ON cam.codigo = v.id_camion
+      WHERE v.id_poliza = ? AND ${activoViaje}
+      GROUP BY ${transpViaje}`,
+    [idPoliza]
+  );
+
+  let anticipos = [];
+  if (await existeColumna('pro_anticipo_provision', 'id_transportista')) {
+    const activoAnticipo = await sqlActivo('pro_anticipo_provision', 'a');
+    anticipos = await query(
+      `SELECT a.id_transportista, COALESCE(SUM(a.valor), 0) AS valor
+         FROM pro_anticipo_provision a
+        WHERE a.id_poliza = ? AND ${activoAnticipo}
+        GROUP BY a.id_transportista`,
+      [idPoliza]
+    );
+  }
+
+  const transpVale = await sqlTransportistaDe('pro_detalle_facturas', 'd', 'cam');
+  const activoVale = await sqlActivo('pro_detalle_facturas', 'd');
+  const diesel = await query(
+    `SELECT ${transpVale} AS id_transportista, COALESCE(SUM(d.total), 0) AS valor
+       FROM pro_detalle_facturas d
+       LEFT JOIN man_camion cam ON cam.codigo = d.id_camion
+      WHERE d.id_poliza = ? AND ${activoVale}
+      GROUP BY ${transpVale}`,
+    [idPoliza]
+  );
+
+  let manejo = [];
+  if (await existeTabla('pro_descuento_aceite')) {
+    const activoManejo = await sqlActivo('pro_descuento_aceite', 'd');
+    manejo = await query(
+      `SELECT d.id_transportista, COALESCE(SUM(d.valor), 0) AS valor
+         FROM pro_descuento_aceite d
+        WHERE d.id_poliza = ? AND ${activoManejo}
+        GROUP BY d.id_transportista`,
+      [idPoliza]
+    );
+  }
+
+  const catalogo = await query('SELECT codigo, nit, nombre_comercial FROM man_transportista');
+  const nombres = new Map(catalogo.map((t) => [Number(t.codigo), t]));
+  const resumen = new Map();
+  const fila = (idCrudo) => {
+    const id = idCrudo == null ? 0 : Number(idCrudo);
+    if (!resumen.has(id)) {
+      const t = nombres.get(id);
+      resumen.set(id, {
+        id_transportista: id || null, nit: t?.nit || '',
+        transportista: t?.nombre_comercial || 'SIN TRANSPORTISTA ASIGNADO',
+        viajes: 0, peso_qq: 0, flete: 0, anticipo: 0, diesel: 0, manejo: 0, liquido: 0,
+      });
+    }
+    return resumen.get(id);
+  };
+  viajes.forEach((r) => { const f = fila(r.id_transportista); f.viajes = Number(r.viajes || 0); f.peso_qq = qq(r.peso_kg); f.flete = money(r.flete); });
+  anticipos.forEach((r) => { fila(r.id_transportista).anticipo = money(r.valor); });
+  diesel.forEach((r) => { fila(r.id_transportista).diesel = money(r.valor); });
+  manejo.forEach((r) => { fila(r.id_transportista).manejo = money(r.valor); });
+
+  const filas = [...resumen.values()]
+    .map((f) => ({ ...f, liquido: money(f.flete - f.anticipo - f.diesel - f.manejo) }))
+    .sort((a, b) => String(a.transportista).localeCompare(String(b.transportista)));
+  const suma = (campo) => money(filas.reduce((total, f) => total + Number(f[campo] || 0), 0));
+  return {
+    poliza,
+    filas,
+    totales: {
+      transportistas: filas.length,
+      viajes: filas.reduce((total, f) => total + Number(f.viajes || 0), 0),
+      peso_qq: suma('peso_qq'), flete: suma('flete'), anticipo: suma('anticipo'),
+      diesel: suma('diesel'), manejo: suma('manejo'), liquido: suma('liquido'),
+    },
+  };
+}
+
+/**
  * RESUMEN DE PÓLIZAS ACTIVAS POR TRANSPORTISTA — matriz transportista × póliza.
  *
  * Cada celda es el SALDO del cruce, no el flete: flete − anticipos − diesel −
@@ -321,6 +419,7 @@ async function resumenPolizasTransportistas() {
 module.exports = {
   transportistas,
   porTransportista,
+  porPoliza,
   resumenPolizasTransportistas,
   QQ_A_KG,
 };
