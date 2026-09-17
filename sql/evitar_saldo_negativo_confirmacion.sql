@@ -1,8 +1,17 @@
+-- ############ SUPERADO — NO EJECUTAR ############
+-- Esta version rechaza el vale cuando a la factura elegida no le alcanza el
+-- saldo, y dejaba el vale trabado sin forma de confirmarlo. La reemplazo:
+--
+--     sql/cruce_dos_facturas_confirmacion.sql
+--
+-- que reparte el vale entre dos facturas (la elegida se liquida y el resto pasa
+-- a la siguiente). Correr este archivo ahora REVIERTE el cruce.
+-- Se conserva solo como historia.
+-- ###############################################
+--
 -- Impide que un vale confirmado desde MATO deje una factura con saldo negativo.
 -- La factura se elige en pantalla; si no alcanza, el usuario debe registrar o
 -- seleccionar la nueva factura antes de confirmar.
--- Ejecutar una vez en la base de datos de produccion:
---   node scripts/setup-db.js evitar_saldo_negativo_confirmacion.sql
 
 DROP PROCEDURE IF EXISTS `sp_confirmar_despacho_api`;
 

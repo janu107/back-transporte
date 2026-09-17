@@ -16,6 +16,14 @@
  *
  *   Es OBLIGATORIA: el procedimiento ya no admite que falte, y avisarlo aquí da
  *   un mensaje entendible en vez de dejar que falle el CALL.
+ *
+ *   CRUCE DE FACTURAS: si al vale no le alcanza el saldo de la factura elegida,
+ *   no se rechaza. La elegida se liquida con lo que le queda y el resto se cobra
+ *   a la siguiente factura activa de la misma bomba, o sea dos filas en
+ *   pro_detalle_facturas con el mismo número de vale. Lo reparte el
+ *   procedimiento (sql/cruce_dos_facturas_confirmacion.sql); aquí se calcula el
+ *   mismo reparto para avisar antes y para rechazar temprano cuando ninguna
+ *   factura cubre el resto.
  */
 const axios = require('axios');
 const { query, execute } = require('../database/db');
@@ -149,12 +157,40 @@ async function validarFacturaElegida({ id_factura_vale: idFactura,
 }
 
 /**
- * La comprobación visual es solo una ayuda. Esta validación en el servidor evita
- * que un cliente desactualizado confirme un vale mayor que el saldo mostrado.
- * El procedimiento SQL aplica la misma regla de forma transaccional para cubrir
- * confirmaciones simultáneas.
+ * La siguiente factura que continúa cuando la elegida se termina: misma bomba y
+ * mismo producto, activa, distinta de la elegida y con saldo para el resto; la
+ * más antigua primero. Es la MISMA regla que aplica sp_confirmar_despacho_api
+ * (sql/cruce_dos_facturas_confirmacion.sql), que es quien decide de verdad —
+ * aquí se repite para poder avisar antes de mandar la confirmación.
  */
-async function validarSaldoFactura(idApi, factura) {
+async function buscarFacturaCruce({ id_producto: idProducto, id_bomba: idBomba },
+  facturaElegida, resto) {
+  const [factura] = await query(
+    `SELECT codigo, factura, saldo, precio
+       FROM man_facturas_vales
+      WHERE id_producto = ? AND id_bomba = ? AND estado = 'ACTIVO'
+        AND codigo <> ? AND saldo >= ?
+      ORDER BY fecha ASC, codigo ASC
+      LIMIT 1`,
+    [idProducto, idBomba, facturaElegida.codigo, resto]
+  );
+  return factura || null;
+}
+
+/**
+ * Reparte los galones del vale entre una o dos facturas.
+ *
+ * Si el vale cabe en la factura elegida, se cobra todo ahí. Si no cabe, la
+ * elegida se liquida con lo que le queda y el resto pasa a la siguiente factura
+ * activa (cruce): dos vales con el mismo número del API, una factura en cero y
+ * la otra empezando a rebajarse. Sólo se rechaza cuando ninguna factura puede
+ * cubrir el resto, porque ahí sí no hay contra qué cobrar.
+ *
+ * La comprobación visual es solo una ayuda: esta corre en el servidor para que
+ * un cliente desactualizado no mande una confirmación destinada a fallar, y el
+ * procedimiento SQL la repite de forma transaccional para las simultáneas.
+ */
+async function planificarCobro(idApi, factura, payload) {
   const [vale] = await query(
     'SELECT api_cant_galones FROM control_captura_api WHERE api_id = ?',
     [idApi]
@@ -165,12 +201,47 @@ async function validarSaldoFactura(idApi, factura) {
     e.status = 400;
     throw e;
   }
-  if (galones > Number(factura.saldo)) {
-    const e = new Error(`La factura ${factura.factura} solo tiene ${Number(factura.saldo).toFixed(2)} gal disponibles y el vale requiere ${galones.toFixed(2)} gal. La factura no puede quedar en negativo; registre o seleccione una nueva factura con saldo suficiente.`);
+
+  const saldo = Number(factura.saldo);
+  if (saldo <= 0) {
+    const e = new Error(`La factura ${factura.factura} ya no tiene saldo disponible. Seleccione otra.`);
     e.status = 409;
     e.recargarFacturas = true;
     throw e;
   }
+  if (galones <= saldo) {
+    return { cruce: false, galones, galones_factura_1: galones, factura_1: factura };
+  }
+
+  const resto = Number((galones - saldo).toFixed(2));
+  const facturaB = await buscarFacturaCruce(payload, factura, resto);
+  if (!facturaB) {
+    const e = new Error(`La factura ${factura.factura} sólo tiene ${saldo.toFixed(2)} gal y el vale requiere ${galones.toFixed(2)} gal. No hay otra factura activa de esta bomba con al menos ${resto.toFixed(2)} gal para cobrar el resto; registre la siguiente factura y vuelva a intentarlo.`);
+    e.status = 409;
+    e.recargarFacturas = true;
+    throw e;
+  }
+  return {
+    cruce: true,
+    galones,
+    factura_1: factura,
+    galones_factura_1: saldo,
+    factura_2: facturaB,
+    galones_factura_2: resto,
+  };
+}
+
+/** El plan sin los objetos completos de factura: lo que la pantalla necesita. */
+function resumirPlan(plan) {
+  const linea = (factura, galones) => (factura
+    ? { codigo: factura.codigo, factura: factura.factura, galones: Number(galones) }
+    : null);
+  return {
+    cruce: plan.cruce,
+    galones: plan.galones,
+    factura_1: linea(plan.factura_1, plan.galones_factura_1),
+    factura_2: linea(plan.factura_2, plan.galones_factura_2),
+  };
 }
 
 /**
@@ -245,7 +316,7 @@ async function confirmar(data, usuario) {
   // Se revisa aquí antes de mandar nada: así el aviso es claro en vez del error
   // que devolvería el procedimiento.
   const factura = await validarFacturaElegida(payload);
-  await validarSaldoFactura(payload.api_id, factura);
+  const plan = await planificarCobro(payload.api_id, factura, payload);
 
   try {
     const resp = await axios.post(CONFIRM_EXTERNAL_URL, payload, {
@@ -263,6 +334,13 @@ async function confirmar(data, usuario) {
       ...resp.data,
       facturas_cobradas: cobro.facturas,
       factura_coincide: coincide,
+      // Dos filas = el vale se repartió entre dos facturas (cruce).
+      hubo_cruce: cobro.facturas.length > 1,
+      // Cómo quedó repartido de verdad, leído de pro_detalle_facturas.
+      resumen_cobro: cobro.facturas
+        .map((f) => `${f.factura || 's/f'}: ${Number(f.cantidad).toFixed(2)} gal`)
+        .join(' · '),
+      plan_cobro: resumirPlan(plan),
       aviso_factura: coincide ? null
         : `El vale quedó cobrado a ${cobro.facturas.map((f) => f.factura).join(' y ') || 'otra factura'}, `
           + 'no a la seleccionada. Revise que el servicio de confirmación esté '
