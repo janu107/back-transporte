@@ -23,8 +23,15 @@ app.use(helmet());
 app.use(cors(corsOptions));
 
 // Parseo de body
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+//
+// El límite por omisión de express.json() son 100 kb, y con eso la carga masiva
+// de viajes se caía con "request entity too large": el archivo se lee en la
+// pantalla y viaja como JSON, unos 200 bytes por viaje. El servicio acepta hasta
+// 5,000 viajes por carga (cargaMasivaViajes.service.js), o sea cerca de 1 MB, y
+// 5 MB deja margen de sobra sin abrir la puerta a cuerpos enormes.
+const LIMITE_BODY = '5mb';
+app.use(express.json({ limit: LIMITE_BODY }));
+app.use(express.urlencoded({ extended: true, limit: LIMITE_BODY }));
 
 // Rutas de la API (montadas bajo /api)
 app.use('/api', routes);

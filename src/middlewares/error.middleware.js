@@ -33,7 +33,19 @@ function errorHandler(err, req, res, next) {
     error: err,
   });
 
-  res.status(status).json({
+  // body-parser rechaza el cuerpo antes de que llegue a ninguna ruta, y su texto
+  // ("request entity too large") no le dice nada a quien está subiendo un
+  // archivo. El arreglo está del lado de quien lo sube: partirlo en dos.
+  if (err.type === 'entity.too.large') {
+    return res.status(413).json({
+      ok: false,
+      message: 'El envío es demasiado grande para procesarlo de una sola vez. Si es una carga '
+        + 'masiva, divida el archivo en partes y súbalas por separado.',
+      requestId: req.requestId,
+    });
+  }
+
+  return res.status(status).json({
     ok: false,
     message: err.message || 'Error interno del servidor',
     requestId: req.requestId,
